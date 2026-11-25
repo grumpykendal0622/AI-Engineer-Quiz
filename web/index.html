@@ -94,8 +94,8 @@
             <h2 id="result-title" aria-live="polite">Library</h2>
             <div class="view-controls">
               <select id="sort" aria-label="Sort results">
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
+                <option value="newest">Created: newest first</option>
+                <option value="oldest">Created: oldest first</option>
                 <option value="name">Name</option>
                 <option value="largest">Largest</option>
               </select>
@@ -103,6 +103,16 @@
           </div>
           <div id="grid" class="grid"></div>
           <div id="empty" class="empty hidden">No assets yet. Click Upload to get started.</div>
+          <div id="library-loading" class="empty hidden" role="status">Loading assets…</div>
+          <div id="library-error" class="empty hidden">
+            <p role="alert">Could not load assets. Your filters have not changed.</p>
+            <button id="library-retry" class="btn" type="button">Retry</button>
+          </div>
+          <div class="library-pages">
+            <button id="page-prev" class="btn" type="button" disabled>← Previous</button>
+            <span id="page-summary" aria-live="polite"></span>
+            <button id="page-next" class="btn" type="button" disabled>Next →</button>
+          </div>
         </div>
 
         <div id="view-collections" class="view hidden">

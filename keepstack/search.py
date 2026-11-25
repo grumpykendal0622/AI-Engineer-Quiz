@@ -18,10 +18,10 @@ from . import ai
 from .db import get_conn
 
 SORTS = {
-    "newest": "a.created_at DESC",
-    "oldest": "a.created_at ASC",
-    "name": "a.title ASC",
-    "largest": "a.size DESC",
+    "newest": "a.created_at DESC, a.id DESC",
+    "oldest": "a.created_at ASC, a.id ASC",
+    "name": "a.title ASC, a.id ASC",
+    "largest": "a.size DESC, a.id DESC",
 }
 
 
@@ -52,7 +52,7 @@ def search(
         return _semantic_search(q, media_type, status, limit, offset)
 
     scope, params = _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, status)
-    order = "bm25(asset_fts)" if _fts_query(q) else SORTS.get(sort, SORTS["newest"])
+    order = SORTS.get(sort, SORTS["newest"])
     total = conn.execute(f"SELECT COUNT(*) AS c{scope}", params).fetchone()["c"]
     rows = conn.execute(
         f"SELECT a.*{scope} ORDER BY {order} LIMIT ? OFFSET ?",
