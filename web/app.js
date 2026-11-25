@@ -15,7 +15,18 @@ async function api(path, opts = {}) {
   const res = await fetch(path, { ...opts, headers });
   if (res.status === 401) { if (session === sessionVersion) logout(); throw new Error("unauthorised"); }
   if (!res.ok) { const t = await res.text(); throw new Error(t || res.statusText); }
-  return res.headers.get("content-type")?.includes("json") ? res.json() : res;
+  return !opts.raw && res.headers.get("content-type")?.includes("json") ? res.json() : res;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function toast(msg, kind = "ok") {
@@ -155,7 +166,7 @@ async function openAsset(uuid) {
     <h2 class="detail-title">${esc(a.title)}</h2>
     <p class="muted">${a.media_type} &middot; ${a.ext?.toUpperCase()} &middot; ${fmtBytes(a.size)} ${a.width?`&middot; ${a.width}&times;${a.height}`:""}</p>
     <div class="btn-row">
-      <a class="btn" href="/api/assets/${uuid}/file" download>Download</a>
+      <button class="btn" id="d-download" type="button">Download original</button>
       ${canEdit?`<button class="btn" id="d-share">Create share link</button>`:""}
       ${["admin","editor"].includes(state.user.role)?`<button class="btn btn-danger" id="d-delete">Delete</button>`:""}
     </div>
@@ -192,6 +203,19 @@ async function openAsset(uuid) {
   `;
 
   // wire detail actions
+  $("#d-download").addEventListener("click", async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const response = await api("/api/assets/" + uuid + "/file", { raw: true });
+      const blob = await response.blob();
+      if (session === sessionVersion) downloadBlob(blob, a.filename);
+    } catch {
+      if (session === sessionVersion) toast("Download failed", "error");
+    } finally {
+      button.disabled = false;
+    }
+  });
   $$("#drawer-body .similar-strip img").forEach(img => img.addEventListener("click", () => openAsset(img.dataset.uuid)));
   if (canEdit) {
     $("#d-save")?.addEventListener("click", async () => {
