@@ -1,17 +1,19 @@
 /* Keepstack single-page client. Vanilla JS, no build step. */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const state = { token: localStorage.getItem("keepstack_token"), user: null,
-  q: "", mode: "keyword", media: null, tag: null, sort: "newest", collection: null };
+const initialFilters = { q: "", mode: "keyword", media: null, tag: null, sort: "newest", collection: null };
+const state = { token: localStorage.getItem("keepstack_token"), user: null, ...initialFilters };
+let sessionVersion = 0;
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
   const headers = opts.headers || {};
+  const session = sessionVersion;
   if (state.token) headers["Authorization"] = "Bearer " + state.token;
   // A JSON body needs a body-carrying method; fetch() rejects GET/HEAD with a body.
   if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); opts.method = opts.method || "POST"; }
   const res = await fetch(path, { ...opts, headers });
-  if (res.status === 401) { logout(); throw new Error("unauthorised"); }
+  if (res.status === 401) { if (session === sessionVersion) logout(); throw new Error("unauthorised"); }
   if (!res.ok) { const t = await res.text(); throw new Error(t || res.statusText); }
   return res.headers.get("content-type")?.includes("json") ? res.json() : res;
 }
@@ -33,29 +35,52 @@ $("#login-form").addEventListener("submit", async (e) => {
   } catch { $("#login-error").textContent = "Invalid credentials"; $("#login-error").classList.remove("hidden"); }
 });
 $("#btn-logout").addEventListener("click", logout);
-function logout() { localStorage.removeItem("keepstack_token"); state.token = null; state.user = null;
-  $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); }
+function logout() {
+  sessionVersion++;
+  localStorage.removeItem("keepstack_token");
+  Object.assign(state, initialFilters, { token: null, user: null });
+  clearTimeout(searchTimer);
+  closeDrawer();
+  $("#upload-modal").classList.add("hidden");
+  $("#toast").classList.add("hidden");
+  $("#search").value = "";
+  $("#search-mode").value = "keyword";
+  $("#sort").value = "newest";
+  $("#active-filter").classList.add("hidden");
+  $("#empty").classList.add("hidden");
+  $("#result-title").textContent = "Library";
+  for (const selector of ["#grid", "#drawer-body", "#facet-tags", "#facet-media", "#collection-list",
+    "#stat-cards", "#fixity-result", "#user-rows", "#audit-rows", "#upload-list", "#user-label"]) {
+    $(selector).replaceChildren();
+  }
+  $("#file-input").value = "";
+  $$(".admin-only").forEach(element => element.classList.add("hidden"));
+  $("#app").classList.add("hidden");
+  $("#login-error").classList.add("hidden");
+  $("#login").classList.remove("hidden");
+}
 
 function enterApp() {
+  $("#login-error").classList.add("hidden");
   $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
   $("#user-label").textContent = `${state.user.username} (${state.user.role})`;
   const isAdmin = state.user.role === "admin";
   $$(".admin-only").forEach(el => el.classList.toggle("hidden", !isAdmin));
-  loadLibrary();
+  $("#btn-upload").classList.toggle("hidden", state.user.role === "viewer");
+  showView("library");
 }
 
 // ---------- navigation ----------
-$$(".nav-item").forEach(btn => btn.addEventListener("click", () => {
-  $$(".nav-item").forEach(b => b.classList.remove("active")); btn.classList.add("active");
-  const view = btn.dataset.view;
-  $$(".view").forEach(v => v.classList.add("hidden"));
-  $("#view-" + (view === "library" ? "library" : view)).classList.remove("hidden");
+$$(".nav-item").forEach(btn => btn.addEventListener("click", () => showView(btn.dataset.view)));
+function showView(view) {
+  $$(".nav-item").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
+  $$(".view").forEach(panel => panel.classList.toggle("hidden", panel.id !== "view-" + view));
   if (view === "library") loadLibrary();
   if (view === "collections") loadCollections();
   if (view === "dashboard") loadDashboard();
   if (view === "users") loadUsers();
   if (view === "audit") loadAudit();
-}));
+}
 
 // ---------- library / search ----------
 let searchTimer;
@@ -65,11 +90,13 @@ $("#sort").addEventListener("change", (e) => { state.sort = e.target.value; load
 $("#active-filter").addEventListener("click", () => { state.media = null; state.tag = null; state.collection = null; loadLibrary(); });
 
 async function loadLibrary() {
+  const session = sessionVersion;
   const p = new URLSearchParams({ q: state.q, sort: state.sort, mode: state.mode, limit: "120" });
   if (state.media) p.set("media_type", state.media);
   if (state.tag) p.set("tag", state.tag);
   if (state.collection) p.set("collection_id", state.collection);
   const data = await api("/api/assets?" + p.toString());
+  if (session !== sessionVersion) return;
   renderFacets(data.facets);
   renderGrid(data.items, data.total);
   const filt = state.media || (state.tag ? "#" + state.tag : null) || (state.collection ? "collection" : null);
@@ -107,6 +134,7 @@ $(".drawer-backdrop").addEventListener("click", closeDrawer);
 function closeDrawer() { drawer.classList.add("hidden"); document.body.classList.remove("modal-open"); }
 
 async function openAsset(uuid) {
+  const session = sessionVersion;
   drawer.classList.remove("hidden");
   document.body.classList.add("modal-open");
   $("#drawer-body").innerHTML = '<p class="muted">Loading...</p>';
@@ -115,6 +143,7 @@ async function openAsset(uuid) {
     api("/api/assets/" + uuid + "/metadata"),
     api("/api/assets/" + uuid + "/similar"),
   ]);
+  if (session !== sessionVersion) return;
   const a = d.asset;
   const canEdit = ["admin","editor","contributor"].includes(state.user.role);
   const preview = a.media_type === "image"
@@ -224,7 +253,9 @@ async function uploadFiles(files) {
 
 // ---------- collections ----------
 async function loadCollections() {
+  const session = sessionVersion;
   const data = await api("/api/collections");
+  if (session !== sessionVersion) return;
   $("#collection-list").innerHTML = data.collections.map(c =>
     `<div class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></div>`).join("")
     || '<p class="muted">No collections yet.</p>';
@@ -243,7 +274,9 @@ $("#btn-new-collection").addEventListener("click", async () => {
 
 // ---------- dashboard ----------
 async function loadDashboard() {
+  const session = sessionVersion;
   const s = await api("/api/stats");
+  if (session !== sessionVersion) return;
   const cards = [
     ["Total assets", s.total_assets], ["Storage used", fmtBytes(s.total_bytes)],
     ["Saved by dedup", fmtBytes(s.dedup_saved_bytes)], ["Tags", s.tags], ["Collections", s.collections],
@@ -252,14 +285,18 @@ async function loadDashboard() {
   $("#stat-cards").innerHTML = cards.map(([l,n]) => `<div class="stat-card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
 }
 $("#btn-fixity").addEventListener("click", async () => {
+  const session = sessionVersion;
   $("#fixity-result").textContent = "Checking...";
   const r = await api("/api/admin/fixity", { method: "POST" });
+  if (session !== sessionVersion) return;
   $("#fixity-result").textContent = r.ok ? `All ${r.checked} blobs verified. Integrity intact.` : `${r.failures.length} of ${r.checked} failed fixity.`;
 });
 
 // ---------- users ----------
 async function loadUsers() {
+  const session = sessionVersion;
   const data = await api("/api/users");
+  if (session !== sessionVersion) return;
   $("#user-rows").innerHTML = data.users.map(u =>
     `<tr><td>${esc(u.username)}</td><td>${esc(u.email||"")}</td><td>${u.role}</td><td>${u.is_active?"Yes":"No"}</td><td>${(u.last_login||"").slice(0,16).replace("T"," ")}</td></tr>`).join("");
 }
@@ -272,7 +309,9 @@ $("#btn-new-user").addEventListener("click", async () => {
 
 // ---------- audit ----------
 async function loadAudit() {
+  const session = sessionVersion;
   const data = await api("/api/audit");
+  if (session !== sessionVersion) return;
   $("#audit-rows").innerHTML = data.entries.map(e =>
     `<tr><td>${(e.ts||"").slice(0,19).replace("T"," ")}</td><td>${esc(e.username||"-")}</td><td>${esc(e.action)}</td>
      <td>${esc(e.target_type||"")} ${esc((e.target_id||"").slice(0,8))}</td><td>${esc(e.detail||"")}</td><td>${esc(e.ip||"")}</td></tr>`).join("");
