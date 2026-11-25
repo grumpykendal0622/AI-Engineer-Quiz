@@ -254,8 +254,12 @@ async function openAsset(uuid) {
 // ---------- upload ----------
 const uploadModal = $("#upload-modal");
 $("#btn-upload").addEventListener("click", () => { uploadModal.classList.remove("hidden"); document.body.classList.add("modal-open"); });
-$("#upload-cancel").addEventListener("click", () => { uploadModal.classList.add("hidden"); document.body.classList.remove("modal-open"); loadLibrary(); });
-$(".modal-backdrop").addEventListener("click", () => { uploadModal.classList.add("hidden"); document.body.classList.remove("modal-open"); });
+function closeUpload() {
+  uploadModal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+$("#upload-cancel").addEventListener("click", closeUpload);
+$(".modal-backdrop").addEventListener("click", closeUpload);
 const dz = $("#dropzone"), fileInput = $("#file-input");
 dz.addEventListener("click", () => fileInput.click());
 dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag"); });
@@ -264,6 +268,8 @@ dz.addEventListener("drop", e => { e.preventDefault(); dz.classList.remove("drag
 fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
 
 async function uploadFiles(files) {
+  const session = sessionVersion;
+  let added = false;
   const list = $("#upload-list");
   for (const file of files) {
     const row = document.createElement("div");
@@ -272,11 +278,14 @@ async function uploadFiles(files) {
     const fd = new FormData(); fd.append("files", file); fd.append("run_ai", $("#ai-toggle").checked);
     try {
       const r = await api("/api/assets", { method: "POST", body: fd });
+      if (session !== sessionVersion) return;
       const created = r.created[0];
+      added ||= !created.duplicate;
       row.classList.add(created.duplicate ? "dup" : "ok");
       row.lastChild.textContent = created.duplicate ? "duplicate (deduped)" : "done";
     } catch (err) { row.classList.add("err"); row.lastChild.textContent = "failed"; }
   }
+  if (added && session === sessionVersion) loadLibrary();
 }
 
 // ---------- collections ----------
