@@ -109,6 +109,29 @@ def test_keyword_search_finds_by_title():
     assert any("harbor" in (i["title"] or "").lower() for i in res["items"])
 
 
+def test_library_filters_bind_join_values_before_where_values():
+    asset = ingest.ingest_stream(io.BytesIO(_img_bytes(color=(65, 130, 170))),
+                                 "catalog_card.jpg", title="Waterside catalog card")
+    conn = get_conn()
+    collection_id = conn.execute(
+        "INSERT INTO collections (uuid, name, created_at) VALUES (?,?,?)",
+        (asset["uuid"], "Catalog", asset["created_at"]),
+    ).lastrowid
+    conn.execute("INSERT INTO collection_assets (collection_id, asset_id, added_at) VALUES (?,?,?)",
+                 (collection_id, asset["id"], asset["created_at"]))
+    tag_id = conn.execute("INSERT INTO tags (name) VALUES (?)", ("catalog-card",)).lastrowid
+    conn.execute("INSERT INTO asset_tags (asset_id, tag_id, source) VALUES (?,?,'manual')",
+                 (asset["id"], tag_id))
+    conn.commit()
+
+    for filters in ({"collection_id": collection_id},
+                    {"tag": "CATALOG-CARD"},
+                    {"collection_id": collection_id, "tag": "catalog-card", "q": "waterside", "media_type": "image"}):
+        result = search.search(**filters)
+        assert result["total"] == 1, filters
+        assert [item["uuid"] for item in result["items"]] == [asset["uuid"]], filters
+
+
 def test_semantic_search_returns_ranked_results():
     ingest.ingest_stream(io.BytesIO(_img_bytes(color=(40, 150, 90), size=(330, 500))),
                          "mountain_trail.jpg", title="Mountain trail in the alpine forest")
