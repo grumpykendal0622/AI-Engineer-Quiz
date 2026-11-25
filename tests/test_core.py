@@ -166,6 +166,39 @@ def test_combined_library_filters(harbor_demo, harbor_filters):
     assert matches(q='"*%(') == set()
 
 
+@pytest.mark.parametrize("direction", ["oldest", "newest"])
+def test_keyword_sort_and_stable_pages(harbor_demo, harbor_filters, direction):
+    _, assets = harbor_demo
+    expected = sorted((assets[f"Harbor view {number:02}"] for number in range(1, 16)),
+                      key=lambda asset: (asset["created_at"], asset["id"]), reverse=direction == "newest")
+    actual = []
+    for offset in range(0, 15, 5):
+        page = search.search(**harbor_filters, sort=direction, limit=5, offset=offset)
+        assert page["total"] == 15
+        actual.extend(item["uuid"] for item in page["items"])
+    assert actual == [asset["uuid"] for asset in expected]
+
+
+@pytest.fixture
+def library_client():
+    from fastapi.testclient import TestClient
+    from keepstack.app import app
+
+    with TestClient(app) as client:
+        response = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        assert response.status_code == 200
+        client.headers["Authorization"] = "Bearer " + response.json()["token"]
+        yield client
+
+
+def test_library_validates_pagination_and_ft_input(library_client):
+    for params in ({"limit": "-1"}, {"limit": "0"}, {"limit": "201"}, {"limit": "bad"},
+                   {"offset": "-1"}, {"offset": "bad"}, {"offset": str(2**80)}):
+        assert library_client.get("/api/assets", params=params).status_code == 422
+    for query in ('"*%(', "«harbor» -'%' (", "中文"):
+        assert library_client.get("/api/assets", params={"q": query, "limit": 1}).status_code == 200
+
+
 def test_semantic_search_returns_ranked_results():
     ingest.ingest_stream(io.BytesIO(_img_bytes(color=(40, 150, 90), size=(330, 500))),
                          "mountain_trail.jpg", title="Mountain trail in the alpine forest")

@@ -122,6 +122,10 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .filter-active [data-kind="includeTags"] { background: #eaf7f1; color: #146447; }
 .filter-active [data-kind="excludeTags"] { background: #fff1e8; color: #8b451e; }
 #back-to-collections { margin-bottom: var(--s2); }
+.library-pages { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+#page-summary { color: var(--muted); }
+.library-pages button:disabled { opacity: .5; cursor: default; }
+#library-error button { margin-top: var(--s1); }
 
 .facets { display: flex; flex-direction: column; gap: var(--s4); }
 .facet-group h4 { margin: 0 0 var(--s2); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }

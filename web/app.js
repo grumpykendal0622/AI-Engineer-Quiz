@@ -6,6 +6,8 @@ const state = { token: localStorage.getItem("keepstack_token"), user: null, ...i
 let sessionVersion = 0;
 let tagCatalog = [];
 let fromCollections = false;
+const pageSize = 12;
+let offset = 0, matchTotal = 0, libraryVersion = 0, libraryReady = false;
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -53,6 +55,10 @@ function logout() {
   localStorage.removeItem("keepstack_token");
   Object.assign(state, initialFilters, { token: null, user: null });
   clearTimeout(searchTimer);
+  offset = 0;
+  matchTotal = 0;
+  libraryReady = false;
+  syncPages();
   closeDrawer();
   $("#upload-modal").classList.add("hidden");
   $("#toast").classList.add("hidden");
@@ -69,6 +75,8 @@ function logout() {
   }
   syncFilters();
   $("#empty").classList.add("hidden");
+  $("#library-loading").classList.add("hidden");
+  $("#library-error").classList.add("hidden");
   $("#result-title").textContent = "Library";
   for (const selector of ["#grid", "#drawer-body", "#collection-list",
     "#stat-cards", "#fixity-result", "#user-rows", "#audit-rows", "#upload-list", "#user-label"]) {
@@ -123,12 +131,42 @@ $("#filter-clear").addEventListener("click", () => {
   updateFilters();
 });
 $("#back-to-collections").addEventListener("click", () => showView("collections"));
+$("#page-prev").addEventListener("click", () => movePage(-pageSize));
+$("#page-next").addEventListener("click", () => movePage(pageSize));
+$("#library-retry").addEventListener("click", loadLibrary);
 
 function updateFilters(delay = 0) {
   clearTimeout(searchTimer);
+  offset = 0;
+  libraryVersion++;
+  startLibraryLoading();
   syncFilters();
   if (delay) searchTimer = setTimeout(loadLibrary, delay);
   else loadLibrary();
+}
+
+function movePage(step) {
+  const next = offset + step;
+  if (!libraryReady || next < 0 || next >= matchTotal) return;
+  offset = next;
+  loadLibrary();
+}
+
+function syncPages() {
+  $("#page-prev").disabled = !libraryReady || offset === 0;
+  $("#page-next").disabled = !libraryReady || offset + pageSize >= matchTotal;
+  $("#page-summary").textContent = libraryReady && matchTotal
+    ? `${offset + 1}–${Math.min(offset + pageSize, matchTotal)} of ${matchTotal}` : "";
+}
+
+function startLibraryLoading() {
+  libraryReady = false;
+  $("#grid").replaceChildren();
+  $("#result-title").textContent = state.q.trim() ? "Results" : "Library";
+  $("#empty").classList.add("hidden");
+  $("#library-error").classList.add("hidden");
+  $("#library-loading").classList.remove("hidden");
+  syncPages();
 }
 
 function syncFilters() {
@@ -240,15 +278,31 @@ function searchParams() {
 }
 
 async function loadLibrary() {
+  if (!state.user || $("#view-library").classList.contains("hidden")) return;
+  clearTimeout(searchTimer);
   const session = sessionVersion;
+  const version = ++libraryVersion;
   const params = searchParams();
-  params.set("limit", "120");
+  params.set("limit", String(pageSize));
+  params.set("offset", String(offset));
+  startLibraryLoading();
   try {
     const data = await api("/api/assets?" + params);
-    if (session !== sessionVersion) return;
+    if (session !== sessionVersion || version !== libraryVersion) return;
+    if (offset && offset >= data.total) {
+      offset = Math.max(0, Math.floor((data.total - 1) / pageSize) * pageSize);
+      loadLibrary();
+      return;
+    }
+    matchTotal = data.total;
+    libraryReady = true;
+    $("#library-loading").classList.add("hidden");
     renderGrid(data.items, data.total);
+    syncPages();
   } catch {
-    if (session === sessionVersion) toast("Could not load assets", "err");
+    if (session !== sessionVersion || version !== libraryVersion) return;
+    $("#library-loading").classList.add("hidden");
+    $("#library-error").classList.remove("hidden");
   }
 }
 
@@ -431,6 +485,7 @@ async function loadCollections() {
     || '<p class="muted">No collections yet.</p>';
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
     state.collection = card.dataset.id;
+    offset = 0;
     fromCollections = true;
     showView("library");
   }));
