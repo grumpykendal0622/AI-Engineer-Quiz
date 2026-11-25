@@ -3,6 +3,7 @@
 These run against a throwaway data directory so they never touch a real
 repository. Run with:  python -m pytest -q
 """
+import csv
 import io
 import json
 import os
@@ -197,6 +198,81 @@ def test_library_validates_pagination_and_ft_input(library_client):
         assert library_client.get("/api/assets", params=params).status_code == 422
     for query in ('"*%(', "«harbor» -'%' (", "中文"):
         assert library_client.get("/api/assets", params={"q": query, "limit": 1}).status_code == 200
+
+
+CSV_FIELDS = ["uuid", "title", "description", "filename", "media_type", "tags", "created_at"]
+
+
+def read_export(response):
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    reader = csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"), newline=""))
+    assert reader.fieldnames == CSV_FIELDS
+    return list(reader)
+
+
+@pytest.mark.parametrize("direction", ["oldest", "newest"])
+def test_csv_matches_all_list_pages(library_client, harbor_filters, direction):
+    params = {**harbor_filters, "sort": direction, "limit": 5}
+    expected = []
+    for offset in (0, 5, 10):
+        listing = library_client.get("/api/assets", params={**params, "offset": offset})
+        assert listing.status_code == 200
+        assert listing.json()["total"] == 15
+        expected.extend(item["uuid"] for item in listing.json()["items"])
+    export = library_client.get("/api/assets/export.csv", params={**params, "offset": 10})
+    assert export.headers["content-disposition"] == 'attachment; filename="keepstack-assets.csv"'
+    rows = read_export(export)
+    assert [row["uuid"] for row in rows] == expected
+    assert all(row["media_type"] == "image" and json.loads(row["tags"]) == ["approved", "campaign"]
+               for row in rows)
+
+
+def test_csv_requires_login_and_keeps_header_for_empty_results(library_client, harbor_filters):
+    path = "/api/assets/export.csv"
+    assert library_client.get(path, headers={"Authorization": ""}).status_code == 401
+    response = library_client.get(path, params={**harbor_filters, "exclude_tag": ["approved"]})
+    assert read_export(response) == []
+
+
+def test_edits_change_query_and_csv(library_client, harbor_demo, harbor_filters):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 01"]
+    uuid = asset["uuid"]
+    path = f"/api/assets/{uuid}"
+    title = '港口, "图库"\n新标题'
+    description = '说明, "备注"\n新内容'
+
+    def assert_uuids(params, expected):
+        listing = library_client.get("/api/assets", params=params)
+        assert listing.status_code == 200
+        assert [item["uuid"] for item in listing.json()["items"]] == expected
+        rows = read_export(library_client.get("/api/assets/export.csv", params=params))
+        assert [row["uuid"] for row in rows] == expected
+        return rows
+
+    try:
+        old_marker = "archivebeforeonly"
+        assert library_client.patch(path, json={"title": asset["title"] + " " + old_marker}).status_code == 200
+        assert_uuids({**harbor_filters, "q": old_marker}, [uuid])
+        assert library_client.patch(path, json={"title": title, "description": description}).status_code == 200
+        assert_uuids({**harbor_filters, "q": old_marker}, [])
+        edited = {**harbor_filters, "q": "港口"}
+        row, = assert_uuids(edited, [uuid])
+        assert (row["title"], row["description"], row["filename"]) == (title, description, asset["filename"])
+        assert_uuids({**edited, "q": "新内容"}, [uuid])
+        assert library_client.delete(path + "/tags/approved").status_code == 200
+        assert_uuids(edited, [])
+        assert library_client.post(path + "/tags", json={"name": "Approved"}).status_code == 200
+        assert_uuids(edited, [uuid])
+        assert library_client.post(path + "/tags", json={"name": "internal"}).status_code == 200
+        assert_uuids(edited, [])
+        assert library_client.delete(path + "/tags/internal").status_code == 200
+        assert json.loads(assert_uuids(edited, [uuid])[0]["tags"]) == ["approved", "campaign"]
+    finally:
+        library_client.patch(path, json={"title": asset["title"], "description": asset["description"] or ""})
+        library_client.post(path + "/tags", json={"name": "approved"})
+        library_client.delete(path + "/tags/internal")
 
 
 def test_semantic_search_returns_ranked_results():
