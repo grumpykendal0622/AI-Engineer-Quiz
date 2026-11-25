@@ -29,13 +29,6 @@
         <div class="brand-mark small">K</div>
         <strong>Keepstack</strong>
       </div>
-      <div class="search-box">
-        <input id="search" placeholder="Search assets, tags, metadata...">
-        <select id="search-mode" title="Search mode">
-          <option value="keyword">Keyword</option>
-          <option value="semantic">Semantic</option>
-        </select>
-      </div>
       <div class="topbar-right">
         <button id="btn-upload" class="btn btn-primary">Upload</button>
         <div class="user-menu">
@@ -55,25 +48,52 @@
           <button class="nav-item admin-only" data-view="audit">Audit log</button>
         </nav>
 
-        <div id="facets" class="facets">
-          <div class="facet-group">
-            <h4>Media type</h4>
-            <ul id="facet-media"></ul>
-          </div>
-          <div class="facet-group">
-            <h4>Top tags</h4>
-            <ul id="facet-tags"></ul>
-          </div>
-        </div>
       </aside>
 
       <main class="content">
         <div id="view-library" class="view">
+          <button id="back-to-collections" class="btn btn-ghost hidden" type="button">← Back to collections</button>
+          <section class="library-filters" aria-label="Library filters">
+            <label class="filter-field">Keyword search
+              <input id="search" type="search" placeholder="Search titles, filenames, tags, or metadata">
+            </label>
+            <div class="filter-options">
+              <label class="filter-field">Collection
+                <select id="filter-collection"><option value="">All collections</option></select>
+              </label>
+              <label class="filter-field">Media type
+                <select id="filter-media">
+                  <option value="">All types</option><option value="image">Image</option>
+                  <option value="video">Video</option><option value="audio">Audio</option>
+                  <option value="document">Document</option><option value="other">Other</option>
+                </select>
+              </label>
+              <details class="tag-filter include-filter" id="include-tags">
+                <summary><strong><span aria-hidden="true">＋</span> Include tags <span class="tag-selection-count"></span></strong><small>Must have <b>all</b> selected tags</small></summary>
+                <div class="tag-picker">
+                  <label class="filter-field">Find tags to include<input type="search" placeholder="Search tag names"></label>
+                  <div class="tag-options"></div>
+                  <button type="button" class="btn btn-ghost more-tags">Show more tags</button>
+                </div>
+              </details>
+              <details class="tag-filter exclude-filter" id="exclude-tags">
+                <summary><strong><span aria-hidden="true">−</span> Exclude tags <span class="tag-selection-count"></span></strong><small>Hide assets with <b>any</b> selected tag</small></summary>
+                <div class="tag-picker">
+                  <label class="filter-field">Find tags to exclude<input type="search" placeholder="Search tag names"></label>
+                  <div class="tag-options"></div>
+                  <button type="button" class="btn btn-ghost more-tags">Show more tags</button>
+                </div>
+              </details>
+            </div>
+            <div class="filter-active"><div id="active-filters" aria-label="Active filters"></div>
+              <button id="filter-clear" class="btn btn-ghost hidden" type="button">Clear all</button>
+            </div>
+            <p id="filter-error" class="error hidden" role="alert"></p>
+          </section>
           <div class="view-head">
-            <h2 id="result-title">Library</h2>
+            <h2 id="result-title" aria-live="polite">Library</h2>
             <div class="view-controls">
-              <span id="active-filter" class="chip hidden"></span>
-              <select id="sort">
+              <select id="sort" aria-label="Sort results">
                 <option value="newest">Newest</option>
                 <option value="oldest">Oldest</option>
                 <option value="name">Name</option>

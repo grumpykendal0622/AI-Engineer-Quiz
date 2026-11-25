@@ -132,6 +132,40 @@ def test_library_filters_bind_join_values_before_where_values():
         assert [item["uuid"] for item in result["items"]] == [asset["uuid"]], filters
 
 
+@pytest.fixture(scope="module")
+def harbor_demo():
+    from keepstack.seed_search import seed_search_demo
+
+    return seed_search_demo()
+
+
+@pytest.fixture
+def harbor_filters(harbor_demo):
+    collection_id, _ = harbor_demo
+    return {"q": "harbor", "collection_id": collection_id, "media_type": "image",
+            "include_tag": ["Approved", "campaign", "approved"],
+            "exclude_tag": ["internal", "restricted"]}
+
+
+def test_combined_library_filters(harbor_demo, harbor_filters):
+    _, assets = harbor_demo
+    expected = {assets[f"Harbor view {number:02}"]["uuid"] for number in range(1, 16)}
+
+    def matches(**changes):
+        result = search.search(**{**harbor_filters, **changes})
+        assert result["total"] == len(result["items"])
+        return {item["uuid"] for item in result["items"]}
+
+    assert matches() == expected
+    assert matches(q="  ") == expected | {assets["River estuary"]["uuid"]}
+    assert matches(collection_id=None) == expected | {assets["Harbor outside collection"]["uuid"]}
+    assert matches(media_type=None) == expected | {assets["Harbor brief"]["uuid"]}
+    assert matches(exclude_tag=["internal"]) == expected | {assets["Harbor restricted"]["uuid"]}
+    assert matches(include_tag=["approved", "camp"]) == {assets["Harbor short tag"]["uuid"]}
+    assert matches(exclude_tag=["APPROVED"]) == set()
+    assert matches(q='"*%(') == set()
+
+
 def test_semantic_search_returns_ranked_results():
     ingest.ingest_stream(io.BytesIO(_img_bytes(color=(40, 150, 90), size=(330, 500))),
                          "mountain_trail.jpg", title="Mountain trail in the alpine forest")

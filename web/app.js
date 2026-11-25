@@ -1,9 +1,11 @@
 /* Keepstack single-page client. Vanilla JS, no build step. */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const initialFilters = { q: "", mode: "keyword", media: null, tag: null, sort: "newest", collection: null };
+const initialFilters = { q: "", media: "", includeTags: [], excludeTags: [], sort: "newest", collection: "" };
 const state = { token: localStorage.getItem("keepstack_token"), user: null, ...initialFilters };
 let sessionVersion = 0;
+let tagCatalog = [];
+let fromCollections = false;
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -55,12 +57,20 @@ function logout() {
   $("#upload-modal").classList.add("hidden");
   $("#toast").classList.add("hidden");
   $("#search").value = "";
-  $("#search-mode").value = "keyword";
   $("#sort").value = "newest";
-  $("#active-filter").classList.add("hidden");
+  tagCatalog = [];
+  fromCollections = false;
+  $("#filter-collection").replaceChildren(new Option("All collections", ""));
+  $("#filter-error").classList.add("hidden");
+  for (const picker of $$(".tag-filter")) {
+    picker.open = false;
+    $("input", picker).value = "";
+    $(".tag-options", picker).replaceChildren();
+  }
+  syncFilters();
   $("#empty").classList.add("hidden");
   $("#result-title").textContent = "Library";
-  for (const selector of ["#grid", "#drawer-body", "#facet-tags", "#facet-media", "#collection-list",
+  for (const selector of ["#grid", "#drawer-body", "#collection-list",
     "#stat-cards", "#fixity-result", "#user-rows", "#audit-rows", "#upload-list", "#user-label"]) {
     $(selector).replaceChildren();
   }
@@ -86,7 +96,11 @@ $$(".nav-item").forEach(btn => btn.addEventListener("click", () => showView(btn.
 function showView(view) {
   $$(".nav-item").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
   $$(".view").forEach(panel => panel.classList.toggle("hidden", panel.id !== "view-" + view));
-  if (view === "library") loadLibrary();
+  if (view === "library") {
+    $("#back-to-collections").classList.toggle("hidden", !fromCollections);
+    loadFilterOptions();
+    loadLibrary();
+  }
   if (view === "collections") loadCollections();
   if (view === "dashboard") loadDashboard();
   if (view === "users") loadUsers();
@@ -95,28 +109,154 @@ function showView(view) {
 
 // ---------- library / search ----------
 let searchTimer;
-$("#search").addEventListener("input", (e) => { state.q = e.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(loadLibrary, 250); });
-$("#search-mode").addEventListener("change", (e) => { state.mode = e.target.value; loadLibrary(); });
-$("#sort").addEventListener("change", (e) => { state.sort = e.target.value; loadLibrary(); });
-$("#active-filter").addEventListener("click", () => { state.media = null; state.tag = null; state.collection = null; loadLibrary(); });
+const tagPickers = { includeTags: $("#include-tags"), excludeTags: $("#exclude-tags") };
+$("#search").addEventListener("input", event => {
+  state.q = event.target.value;
+  updateFilters(250);
+});
+$("#filter-collection").addEventListener("change", event => { state.collection = event.target.value; updateFilters(); });
+$("#filter-media").addEventListener("change", event => { state.media = event.target.value; updateFilters(); });
+$("#sort").addEventListener("change", event => { state.sort = event.target.value; updateFilters(); });
+$("#filter-clear").addEventListener("click", () => {
+  const { sort } = state;
+  Object.assign(state, initialFilters, { sort });
+  updateFilters();
+});
+$("#back-to-collections").addEventListener("click", () => showView("collections"));
+
+function updateFilters(delay = 0) {
+  clearTimeout(searchTimer);
+  syncFilters();
+  if (delay) searchTimer = setTimeout(loadLibrary, delay);
+  else loadLibrary();
+}
+
+function syncFilters() {
+  $("#search").value = state.q;
+  $("#filter-collection").value = state.collection;
+  $("#filter-media").value = state.media;
+  const chips = $("#active-filters");
+  chips.replaceChildren();
+  const chip = (key, label, remove) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn";
+    button.dataset.kind = key;
+    button.textContent = label + " ×";
+    button.setAttribute("aria-label", "Remove " + label);
+    button.addEventListener("click", () => { remove(); updateFilters(); });
+    chips.append(button);
+  };
+  if (state.q.trim()) chip("q", "Keyword: " + state.q.trim(), () => { state.q = ""; });
+  if (state.collection) {
+    const label = $("#filter-collection").selectedOptions[0]?.textContent;
+    if (label) chip("collection", "Collection: " + label, () => { state.collection = ""; });
+  }
+  if (state.media) chip("media", "Type: " + state.media, () => { state.media = ""; });
+  for (const [key, picker] of Object.entries(tagPickers)) {
+    $(".tag-selection-count", picker).textContent = state[key].length ? "(" + state[key].length + ")" : "";
+    for (const name of state[key]) {
+      const prefix = key === "includeTags" ? "Include: " : "Exclude: ";
+      chip(key, prefix + name, () => { state[key] = state[key].filter(tag => tag !== name); });
+    }
+    $$(".tag-options button", picker).forEach(button => {
+      button.setAttribute("aria-pressed", String(state[key].includes(button.dataset.tag)));
+    });
+  }
+  $("#filter-clear").classList.toggle("hidden", !chips.childElementCount);
+}
+
+function renderTagOptions(key) {
+  const picker = tagPickers[key];
+  const query = $("input", picker).value.trim().toLowerCase();
+  const names = tagCatalog.filter(name => name.toLowerCase().includes(query));
+  const list = $(".tag-options", picker);
+  const limit = Number(picker.dataset.limit || 8);
+  list.replaceChildren();
+  for (const name of names.slice(0, limit)) {
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.type = "button";
+    button.textContent = name;
+    button.dataset.tag = name;
+    button.setAttribute("aria-pressed", String(state[key].includes(name)));
+    button.addEventListener("click", () => {
+      if (state[key].includes(name)) state[key] = state[key].filter(tag => tag !== name);
+      else if (state[key].length < 100) state[key] = [...state[key], name];
+      else { toast("Choose at most 100 tags per group", "err"); return; }
+      updateFilters();
+    });
+    list.append(button);
+  }
+  if (!names.length) list.textContent = query ? "No tag names found." : "No tags available.";
+  $(".more-tags", picker).classList.toggle("hidden", names.length <= limit);
+}
+
+for (const [key, picker] of Object.entries(tagPickers)) {
+  $("summary", picker).addEventListener("click", () => {
+    if (!picker.open) {
+      Object.values(tagPickers).filter(other => other !== picker).forEach(other => { other.open = false; });
+      renderTagOptions(key);
+    }
+  });
+  $("input", picker).addEventListener("input", () => { picker.dataset.limit = "8"; renderTagOptions(key); });
+  $(".more-tags", picker).addEventListener("click", () => {
+    picker.dataset.limit = String(Number(picker.dataset.limit || 8) + 8);
+    renderTagOptions(key);
+  });
+  picker.addEventListener("keydown", event => {
+    if (event.key === "Escape") { picker.open = false; $("summary", picker).focus(); }
+  });
+}
+document.addEventListener("click", event => {
+  if (!event.target.closest(".tag-filter")) Object.values(tagPickers).forEach(picker => { picker.open = false; });
+});
+
+async function loadFilterOptions() {
+  const session = sessionVersion;
+  try {
+    const [collections, tags] = await Promise.all([api("/api/collections"), api("/api/tags")]);
+    if (session !== sessionVersion) return;
+    $("#filter-collection").replaceChildren(new Option("All collections", ""),
+      ...collections.collections.map(item => new Option(item.name, item.id)));
+    tagCatalog = tags.tags.map(tag => tag.name);
+    Object.keys(tagPickers).forEach(renderTagOptions);
+    $("#filter-error").classList.add("hidden");
+    syncFilters();
+  } catch {
+    if (session !== sessionVersion) return;
+    $("#filter-error").textContent = "Could not load filter options. Reopen Library to retry.";
+    $("#filter-error").classList.remove("hidden");
+  }
+}
+
+function searchParams() {
+  const params = new URLSearchParams({ q: state.q, sort: state.sort });
+  if (state.media) params.set("media_type", state.media);
+  if (state.collection) params.set("collection_id", state.collection);
+  state.includeTags.forEach(name => params.append("include_tag", name));
+  state.excludeTags.forEach(name => params.append("exclude_tag", name));
+  return params;
+}
 
 async function loadLibrary() {
   const session = sessionVersion;
-  const p = new URLSearchParams({ q: state.q, sort: state.sort, mode: state.mode, limit: "120" });
-  if (state.media) p.set("media_type", state.media);
-  if (state.tag) p.set("tag", state.tag);
-  if (state.collection) p.set("collection_id", state.collection);
-  const data = await api("/api/assets?" + p.toString());
-  if (session !== sessionVersion) return;
-  renderFacets(data.facets);
-  renderGrid(data.items, data.total);
-  const filt = state.media || (state.tag ? "#" + state.tag : null) || (state.collection ? "collection" : null);
-  $("#active-filter").classList.toggle("hidden", !filt);
-  if (filt) $("#active-filter").textContent = filt;
+  const params = searchParams();
+  params.set("limit", "120");
+  try {
+    const data = await api("/api/assets?" + params);
+    if (session !== sessionVersion) return;
+    renderGrid(data.items, data.total);
+  } catch {
+    if (session === sessionVersion) toast("Could not load assets", "err");
+  }
 }
 
 function renderGrid(items, total) {
-  $("#result-title").textContent = state.q ? `Results (${total})` : `Library (${total})`;
+  $("#result-title").textContent = state.q.trim() ? `Results (${total})` : `Library (${total})`;
+  const conflict = state.includeTags.find(name => state.excludeTags.includes(name));
+  $("#empty").textContent = conflict ? `“${conflict}” is both included and excluded. Remove one condition.`
+    : $("#active-filters").childElementCount ? "No assets match these filters. Try removing a condition." : "No assets yet. Click Upload to get started.";
   $("#empty").classList.toggle("hidden", items.length > 0);
   $("#grid").innerHTML = items.map(a => `
     <div class="card" data-uuid="${a.uuid}">
@@ -127,15 +267,6 @@ function renderGrid(items, total) {
       </div>
     </div>`).join("");
   $$("#grid .card").forEach(c => c.addEventListener("click", () => openAsset(c.dataset.uuid)));
-}
-
-function renderFacets(facets) {
-  $("#facet-media").innerHTML = (facets.media_types || []).map(m =>
-    `<li class="${state.media===m.value?'active':''}" data-media="${m.value}"><span>${m.value}</span><span class="count">${m.count}</span></li>`).join("");
-  $("#facet-tags").innerHTML = (facets.tags || []).slice(0, 18).map(t =>
-    `<li class="${state.tag===t.value?'active':''}" data-tag="${esc(t.value)}"><span>${esc(t.value)}</span><span class="count">${t.count}</span></li>`).join("");
-  $$("#facet-media li").forEach(li => li.addEventListener("click", () => { state.media = state.media===li.dataset.media?null:li.dataset.media; loadLibrary(); }));
-  $$("#facet-tags li").forEach(li => li.addEventListener("click", () => { state.tag = state.tag===li.dataset.tag?null:li.dataset.tag; loadLibrary(); }));
 }
 
 // ---------- asset detail drawer ----------
@@ -211,7 +342,7 @@ async function openAsset(uuid) {
       const blob = await response.blob();
       if (session === sessionVersion) downloadBlob(blob, a.filename);
     } catch {
-      if (session === sessionVersion) toast("Download failed", "error");
+      if (session === sessionVersion) toast("Download failed", "err");
     } finally {
       button.disabled = false;
     }
@@ -230,6 +361,7 @@ async function openAsset(uuid) {
         if (session !== sessionVersion) return;
         openAsset(uuid);
         loadLibrary();
+        loadFilterOptions();
       }
     });
     $$("#tag-row .rm").forEach(rm => rm.addEventListener("click", async () => {
@@ -237,6 +369,7 @@ async function openAsset(uuid) {
       if (session !== sessionVersion) return;
       openAsset(uuid);
       loadLibrary();
+      loadFilterOptions();
     }));
     $("#d-share")?.addEventListener("click", async () => {
       const r = await api("/api/shares", { json: { target_type: "asset", target_id: a.id, permission: "download" } });
@@ -285,7 +418,7 @@ async function uploadFiles(files) {
       row.lastChild.textContent = created.duplicate ? "duplicate (deduped)" : "done";
     } catch (err) { row.classList.add("err"); row.lastChild.textContent = "failed"; }
   }
-  if (added && session === sessionVersion) loadLibrary();
+  if (added && session === sessionVersion) { loadLibrary(); loadFilterOptions(); }
 }
 
 // ---------- collections ----------
@@ -294,14 +427,12 @@ async function loadCollections() {
   const data = await api("/api/collections");
   if (session !== sessionVersion) return;
   $("#collection-list").innerHTML = data.collections.map(c =>
-    `<div class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></div>`).join("")
+    `<button type="button" class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></button>`).join("")
     || '<p class="muted">No collections yet.</p>';
   $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
-    state.collection = card.dataset.id; state.media = null; state.tag = null;
-    $$(".nav-item").forEach(b => b.classList.remove("active"));
-    $('.nav-item[data-view="library"]').classList.add("active");
-    $$(".view").forEach(v => v.classList.add("hidden")); $("#view-library").classList.remove("hidden");
-    loadLibrary();
+    state.collection = card.dataset.id;
+    fromCollections = true;
+    showView("library");
   }));
 }
 $("#btn-new-collection").addEventListener("click", async () => {

@@ -179,7 +179,8 @@ def list_assets(
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
     collection_id: Optional[int] = None,
-    status: str = "active",
+    include_tag: Optional[list[str]] = Query(None, max_length=100),
+    exclude_tag: Optional[list[str]] = Query(None, max_length=100),
     sort: str = "newest",
     mode: str = "keyword",
     limit: int = Query(60, le=200),
@@ -187,7 +188,8 @@ def list_assets(
     user: dict = Depends(require_user),
 ):
     return search.search(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
-                         status=status, sort=sort, mode=mode, limit=limit, offset=offset)
+                         include_tag=include_tag or (), exclude_tag=exclude_tag or (),
+                         sort=sort, mode=mode, limit=limit, offset=offset)
 
 
 def _get_asset_or_404(uuid: str) -> dict:

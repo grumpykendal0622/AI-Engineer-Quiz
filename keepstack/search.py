@@ -11,6 +11,7 @@ drill-down sidebar.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Optional
 
 from . import ai
@@ -35,6 +36,8 @@ def search(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    include_tag: Sequence[str] = (),
+    exclude_tag: Sequence[str] = (),
     collection_id: Optional[int] = None,
     status: str = "active",
     sort: str = "newest",
@@ -45,49 +48,60 @@ def search(
     conn = get_conn()
 
     # Semantic mode ranks the candidate pool by embedding similarity.
-    if mode == "semantic" and q.strip():
+    if mode == "semantic" and q.strip() and not (tag or include_tag or exclude_tag or collection_id):
         return _semantic_search(q, media_type, status, limit, offset)
 
+    scope, params = _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, status)
+    order = "bm25(asset_fts)" if _fts_query(q) else SORTS.get(sort, SORTS["newest"])
+    total = conn.execute(f"SELECT COUNT(*) AS c{scope}", params).fetchone()["c"]
+    rows = conn.execute(
+        f"SELECT a.*{scope} ORDER BY {order} LIMIT ? OFFSET ?",
+        [*params, limit, offset],
+    ).fetchall()
+    return {
+        "total": total,
+        "items": [_card(dict(row)) for row in rows],
+        "facets": _facets(status),
+        "mode": "keyword",
+    }
+
+
+def _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, status):
+    included = {name.strip().lower() for name in [*include_tag, tag or ""] if name.strip()}
+    excluded = {name.strip().lower() for name in exclude_tag if name.strip()}
     where = ["a.status = ?"]
     where_params: list = [status]
     join = ""
     join_params: list = []
 
-    if q.strip():
+    fts = _fts_query(q)
+    if fts:
         join += " JOIN asset_fts f ON f.rowid = a.id"
         where.append("asset_fts MATCH ?")
-        where_params.append(_fts_query(q))
+        where_params.append(fts)
+    elif q.strip():
+        where.append("0")
     if media_type:
         where.append("a.media_type = ?")
         where_params.append(media_type)
-    if tag:
-        join += (" JOIN asset_tags at ON at.asset_id = a.id"
-                 " JOIN tags t ON t.id = at.tag_id AND t.name = ?")
-        join_params.append(tag.lower())
-    if collection_id:
+    if collection_id is not None:
         join += " JOIN collection_assets ca ON ca.asset_id = a.id AND ca.collection_id = ?"
         join_params.append(collection_id)
 
-    params = [*join_params, *where_params]
+    tag_scope = "FROM asset_tags at JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = a.id"
+    if included & excluded:
+        where.append("0")
+    else:
+        if included:
+            placeholders = ", ".join("?" for name in included)
+            where.append(f"(SELECT COUNT(*) {tag_scope} AND t.name IN ({placeholders})) = ?")
+            where_params.extend([*sorted(included), len(included)])
+        if excluded:
+            placeholders = ", ".join("?" for name in excluded)
+            where.append(f"NOT EXISTS (SELECT 1 {tag_scope} AND t.name IN ({placeholders}))")
+            where_params.extend(sorted(excluded))
     where_sql = " AND ".join(where)
-    order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, SORTS["newest"])
-
-    total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM assets a{join} WHERE {where_sql}", params
-    ).fetchone()["c"]
-
-    rows = conn.execute(
-        f"""SELECT a.* FROM assets a{join} WHERE {where_sql}
-            ORDER BY {order} LIMIT ? OFFSET ?""",
-        [*params, limit, offset],
-    ).fetchall()
-
-    return {
-        "total": total,
-        "items": [_card(dict(r)) for r in rows],
-        "facets": _facets(status),
-        "mode": mode,
-    }
+    return f" FROM assets a{join} WHERE {where_sql}", [*join_params, *where_params]
 
 
 def _semantic_search(q, media_type, status, limit, offset) -> dict:
