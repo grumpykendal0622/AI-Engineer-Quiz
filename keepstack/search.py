@@ -11,10 +11,15 @@ drill-down sidebar.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import closing
+from itertools import groupby
 from typing import Optional
 
 from . import ai
+from .config import config
 from .db import get_conn
 
 SORTS = {
@@ -102,6 +107,31 @@ def _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, 
             where_params.extend(sorted(excluded))
     where_sql = " AND ".join(where)
     return f" FROM assets a{join} WHERE {where_sql}", [*join_params, *where_params]
+
+
+def export_rows(
+    *, q: str = "", media_type: Optional[str] = None, tag: Optional[str] = None,
+    include_tag: Sequence[str] = (), exclude_tag: Sequence[str] = (),
+    collection_id: Optional[int] = None, sort: str = "newest",
+) -> Iterator[tuple]:
+    scope, params = _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, "active")
+    order = SORTS.get(sort, SORTS["newest"])
+    statement = f"""
+        WITH matches AS (SELECT a.*{scope})
+        SELECT a.uuid, a.title, a.description, a.filename, a.media_type, a.created_at, t.name AS tag
+        FROM matches a
+        LEFT JOIN asset_tags at ON at.asset_id = a.id
+        LEFT JOIN tags t ON t.id = at.tag_id
+        ORDER BY {order}, t.name
+    """
+    with closing(sqlite3.connect(config.db_path, check_same_thread=False)) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(statement, params)
+        for _, tagged_rows in groupby(cursor, key=lambda row: row["uuid"]):
+            first = next(tagged_rows)
+            tags = [] if first["tag"] is None else [first["tag"], *(row["tag"] for row in tagged_rows)]
+            yield (first["uuid"], first["title"], first["description"], first["filename"],
+                   first["media_type"], json.dumps(tags, ensure_ascii=False), first["created_at"])
 
 
 def _semantic_search(q, media_type, status, limit, offset) -> dict:

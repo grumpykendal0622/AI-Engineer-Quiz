@@ -126,6 +126,8 @@ button, input, select { font-family: inherit; font-size: inherit; }
 #page-summary { color: var(--muted); }
 .library-pages button:disabled { opacity: .5; cursor: default; }
 #library-error button { margin-top: var(--s1); }
+#view-library .view-head, #view-library .view-controls { flex-wrap: wrap; }
+#export-csv:disabled { opacity: .55; cursor: default; }
 
 .facets { display: flex; flex-direction: column; gap: var(--s4); }
 .facet-group h4 { margin: 0 0 var(--s2); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }

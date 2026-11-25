@@ -8,6 +8,7 @@ let tagCatalog = [];
 let fromCollections = false;
 const pageSize = 12;
 let offset = 0, matchTotal = 0, libraryVersion = 0, libraryReady = false;
+let exporting = false;
 
 // ---------- API helper ----------
 async function api(path, opts = {}) {
@@ -17,7 +18,17 @@ async function api(path, opts = {}) {
   // A JSON body needs a body-carrying method; fetch() rejects GET/HEAD with a body.
   if (opts.json) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); opts.method = opts.method || "POST"; }
   const res = await fetch(path, { ...opts, headers });
-  if (res.status === 401) { if (session === sessionVersion) logout(); throw new Error("unauthorised"); }
+  if (res.status === 401) {
+    if (session === sessionVersion) {
+      const expired = Boolean(state.user);
+      logout();
+      if (expired) {
+        $("#login-error").textContent = "Session expired. Sign in again.";
+        $("#login-error").classList.remove("hidden");
+      }
+    }
+    throw new Error("unauthorised");
+  }
   if (!res.ok) { const t = await res.text(); throw new Error(t || res.statusText); }
   return !opts.raw && res.headers.get("content-type")?.includes("json") ? res.json() : res;
 }
@@ -58,6 +69,7 @@ function logout() {
   offset = 0;
   matchTotal = 0;
   libraryReady = false;
+  exporting = false;
   syncPages();
   closeDrawer();
   $("#upload-modal").classList.add("hidden");
@@ -134,6 +146,7 @@ $("#back-to-collections").addEventListener("click", () => showView("collections"
 $("#page-prev").addEventListener("click", () => movePage(-pageSize));
 $("#page-next").addEventListener("click", () => movePage(pageSize));
 $("#library-retry").addEventListener("click", loadLibrary);
+$("#export-csv").addEventListener("click", exportLibrary);
 
 function updateFilters(delay = 0) {
   clearTimeout(searchTimer);
@@ -157,6 +170,32 @@ function syncPages() {
   $("#page-next").disabled = !libraryReady || offset + pageSize >= matchTotal;
   $("#page-summary").textContent = libraryReady && matchTotal
     ? `${offset + 1}–${Math.min(offset + pageSize, matchTotal)} of ${matchTotal}` : "";
+  syncExport();
+}
+
+function syncExport() {
+  $("#export-csv").disabled = !libraryReady || exporting;
+  $("#export-csv").textContent = exporting ? "Exporting…"
+    : libraryReady ? `↓ Export all ${matchTotal} (CSV)` : "Export CSV";
+}
+
+async function exportLibrary() {
+  if (!libraryReady || exporting) return;
+  const session = sessionVersion;
+  exporting = true;
+  syncExport();
+  try {
+    const response = await api("/api/assets/export.csv?" + searchParams(), { raw: true });
+    const blob = await response.blob();
+    if (session === sessionVersion) downloadBlob(blob, "keepstack-assets.csv");
+  } catch {
+    if (session === sessionVersion) toast("CSV export failed. Try again.", "err");
+  } finally {
+    if (session === sessionVersion) {
+      exporting = false;
+      syncExport();
+    }
+  }
 }
 
 function startLibraryLoading() {
