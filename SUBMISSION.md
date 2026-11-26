@@ -1,112 +1,177 @@
-# Keepstack 素材检索测评
+# Keepstack — 素材检索与结果导出
 
-[Fork](https://github.com/grumpykendal0622/AI-Engineer-Quiz) · [分支 `codex/asset-search`](https://github.com/grumpykendal0622/AI-Engineer-Quiz/tree/codex/asset-search) · [Draft PR 与最终提交](https://github.com/grumpykendal0622/AI-Engineer-Quiz/pull/1)
+- Fork：[AI-Engineer-Quiz](https://github.com/grumpykendal0622/AI-Engineer-Quiz)
+- 分支：[codex/asset-search](https://github.com/grumpykendal0622/AI-Engineer-Quiz/tree/codex/asset-search)
+- 验收代码 Commit：`443bbeafecf96e5b2ac5be60cf13cad535d09665`
+- [Pull Request](https://github.com/grumpykendal0622/AI-Engineer-Quiz/pull/1) | [CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45771011402)
 
-这次在 Keepstack 的 Library 加了一条可直接操作的流程。内容运营能把关键词、集合、素材类型和标签叠加起来，看清筛选后的结果，再下载整批素材的 CSV 清单。下面按[题目 README](README.md)的四项要求说明做了什么、怎么验。
+## 1. 本地运行
 
-## 运行与演示账号
-
-已有演示服务时直接打开 [http://127.0.0.1:8011](http://127.0.0.1:8011)。README 的 `8000` 是应用默认端口，此处的 `8011` 是演示实例的配置。
-
-从干净 checkout 启动时，在仓库根目录运行下列命令。需要 Python 3.10+。若 `8011` 已被占用，把 `KEEPSTACK_PORT` 改成空闲端口，例如 `8012`，然后打开对应地址。
+环境要求为 Python 3.10+。克隆仓库并切换至 `codex/asset-search` 分支，在项目根目录执行：
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+source .venv/bin/activate
+pip install -e '.[dev]'
+
 export KEEPSTACK_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/keepstack-review.XXXXXX")"
-export KEEPSTACK_AI_ENABLED=false KEEPSTACK_OCR_ENABLED=false
-export KEEPSTACK_HOST=127.0.0.1 KEEPSTACK_PORT=8011
-export KEEPSTACK_BASE_URL="http://127.0.0.1:${KEEPSTACK_PORT}"
-.venv/bin/python -m keepstack seed
-.venv/bin/python -m keepstack.seed_search
-.venv/bin/python -m keepstack
+export KEEPSTACK_HOST=127.0.0.1
+export KEEPSTACK_AI_ENABLED=false
+export KEEPSTACK_OCR_ENABLED=false
+
+python -m keepstack seed
+python -m keepstack.seed_search
+python -m keepstack
 ```
 
-`seed` 生成演示账号和基础素材，`seed_search` 生成题目的 Harbor 场景。每次重新验收可用新的临时数据目录。下表是这套种子数据的本地账号。点右上角 **Sign out** 就能换角色。
+访问 [http://localhost:8000](http://localhost:8000)。已经在 `8011` 启动本地演示服务时，可直接访问 [http://127.0.0.1:8011](http://127.0.0.1:8011)。
 
-| 角色 | 用户名／密码 | 能看到的页面和操作 |
-| --- | --- | --- |
-| Viewer | `viewer`／`demo1234` | 侧栏有 **Library、Collections**。能搜索、排序、翻页、导出 CSV、查看集合及素材详情、下载原文件。隐藏上传、编辑、分享创建和删除入口。 |
-| Contributor | `contributor`／`demo1234` | 同样看到 **Library、Collections**，右上角增加 **Upload**。能编辑素材和标签、创建分享链接、新建集合、改描述及增减成员。隐藏删除素材和集合的入口。 |
-| Editor | `curator`／`demo1234` | 同样看到 **Library、Collections**。拥有 Contributor 的操作，另外能删除素材和集合。 |
-| Admin | `admin`／`admin` | 在 Editor 基础上，侧栏多出 **Dashboard、Users、Audit log**。可以运行完整性检查、添加用户和查看审计记录。 |
+`seed` 生成基础素材及演示账号，`seed_search` 生成用于验收的 Harbor 场景数据。两步使用临时数据目录，运行时无需额外准备素材或模型。
 
-## 1. 组合筛选
+### 演示账号
 
-- **关键词**沿用原来的全文搜索。可搜标题、描述、文件名、标签等已索引内容。搜索框留空就不限关键词。
-- **Collection** 可以搜索集合名、翻页、单选，也可以选 **All collections**。**Media type** 可继续限制图片、视频等类型。
-- **Include tags** 选两个标签时，素材必须同时带有这两个标签。**Exclude tags** 选两个标签时，素材只要带其中任何一个就会被排除。标签按完整名称匹配，`camp` 和 `campaign` 是不同标签。大小写和重复输入不改变结果。同一标签同时包含和排除时，页面提示冲突并显示零条。
-- 所有条件必须同时满足，结果只显示在库素材。生效条件列在筛选栏下方，可以单独移除，也可以点 **Clear all**。标题显示当前匹配数。
+| 角色 | 用户名 | 密码 | 可见页面及主要权限 |
+| --- | --- | --- | --- |
+| Viewer | `viewer` | `demo1234` | Library、Collections。可浏览、检索、导出和下载。 |
+| Contributor | `contributor` | `demo1234` | Library、Collections、Upload。另可编辑素材、创建分享链接、新建集合、编辑描述及管理成员。 |
+| Editor | `curator` | `demo1234` | Library、Collections、Upload。拥有 Contributor 的操作，另可删除素材和集合。 |
+| Admin | `admin` | `admin` | 拥有 Editor 的操作。侧栏另有 Dashboard、Users、Audit log，可运行完整性检查、添加用户和查看审计记录。 |
 
-**怎么验。** 用 Admin 登录，在 Library 搜 `harbor`，将 **Collection** 设为 **Harbor campaign**，类型选 **Image**，包含 `approved` 和 `campaign`，排除 `internal`。干净的演示数据会匹配 **16 条**。再排除 `restricted`，会少一张带该标签的图片，剩 **15 条**。
+## 2. 核心功能
 
-## 2. 排序与分页
+### 2.1 组合筛选
 
-- 可按创建时间选择最新或最早优先，输入关键词后也按这个顺序排列。每页 12 条，页面会显示总数和上一页／下一页。
-- 创建时间相同的素材按固定顺序排列。测试逐页核对过，同一批数据翻页时没有重复或遗漏。
-- 改筛选或排序回到第一页。测试故意让旧搜索晚回来，页面仍显示刚刚选择的条件。没有匹配素材时提示调整筛选，接口失败时可以点 **Retry**。非法分页参数会被拒绝，引号、星号和中文等搜索输入可以正常提交。
+Library 支持以下条件同时生效。
 
-**怎么验。** 用上面的 15 条结果，第一页有 12 张，第二页有 3 张。留在第二页切到最早优先，页面会回到第一页，最早的素材排到前面。
+| 筛选条件 | 匹配规则 |
+| --- | --- |
+| Search | 沿用原有 FTS5 搜索字段及分词方式，留空时不限制关键词 |
+| Collection | 选择单个集合或全部集合 |
+| Media type | 按素材类型筛选 |
+| Include tags | 必须包含全部指定标签（AND） |
+| Exclude tags | 包含任意指定标签即排除（OR） |
 
-## 3. 导出全部匹配结果
+所有条件取交集，仅返回 `active` 素材。标签按完整名称匹配，沿用原有大小写处理规则。重复标签不影响结果，同一标签同时被包含和排除时返回空结果。
 
-- **Export all (CSV)** 下载整个搜索结果。文件沿用点击时的关键词、集合、类型、标签和排序。只要能按当前角色查看这些结果，登录后就能下载清单。
-- 列为 `uuid`、`title`、`description`、`filename`、`media_type`、`tags`、`created_at`。多个标签写成 JSON 数组，例如 `["approved","campaign"]`，无标签写成 `[]`。
-- 实测中文、逗号、引号和字段内换行可以完整读回。零条结果仍可下载表头。下载失败会显示提示。CSV 只包含清单，原文件可在素材详情单独下载。
+页面展示当前生效条件及匹配总数，支持修改、单独移除和一键清除。集合及标签选择器支持搜索和分页。
 
-**怎么验。** 在第二页还只看到 3 张图时，点 **Export all 15 (CSV)**。打开文件会有 **15 行数据**。测试还逐条核对过，文件顺序和两页列表拼起来一致。
+### 2.2 排序与分页
 
-## 4. 修改后结果正确
+- 支持按创建时间升序、降序排列，包括关键词搜索结果。
+- 每页展示 12 条素材，提供上一页、下一页及匹配总数。
+- 创建时间相同时使用 ID 作为次级排序依据，保证数据不变时跨页无重复、无遗漏。
+- 修改筛选或排序后自动返回第一页。快速更换条件时，页面采用最新查询的结果。
+- 支持空结果提示、加载失败重试、非法分页参数校验及特殊字符输入。
 
-- 在 Library 或 Collections 点开任一素材，使用同一个详情抽屉。标题、描述、标签和所属集合可以一起改，点一次 **Save changes** 生效。标签和集合选项都可以搜索和翻页。
-- 保存后用新内容搜索，可以在列表和新下载的 CSV 里看到修改。增删标签或集合成员也会影响它能否被相应条件选中。保存失败时草稿保留，可重试。
+### 2.3 导出全部匹配结果
 
-**怎么验。** 给 `Harbor view 01` 的描述加上 `reviewnote`，保存后在 Library 搜这个词。该素材会出现，下载的 CSV 能读到新描述。这条流程已用真实页面和下载文件复测。
+Library 提供 CSV 下载入口，导出全部匹配素材。关键词、集合、素材类型、标签及排序均与列表保持一致。
 
-## 补充完成的功能和取舍
+字段为 `uuid`、`title`、`description`、`filename`、`media_type`、`tags`、`created_at`。多标签采用 JSON 数组格式，例如 `["approved","campaign"]`，无标签时为 `[]`。
 
-- **Collections 负责管理集合。** 可以新建空集合、填写或编辑可选描述、看成员、批量加素材。用详情抽屉可以把素材移出集合或加入其他集合。移出成员和删除集合都保留原素材。Library 的集合选项、列表和 CSV 随集合变化更新。
-- **Library 负责跨集合找素材和导出。** 将原侧栏标签和素材类型入口放到 Library 筛选区，使条件和结果在同一页。Collections 保留浏览与成员管理。Dashboard、Users 和 Audit log 继续由 Admin 打开。保留 FastAPI、SQLite／FTS5 和原生 JavaScript。
-- **上传和失败恢复。** 每个文件显示排队、上传中、成功、重复或失败。测试中断一个文件后，其余文件继续，恢复连接后可以单独重试。Viewer 的空库只提示暂无素材。详情主请求、嵌入元数据和相似素材各自可重试，编辑草稿保留。
+支持中文、逗号、引号及字段内换行，零条结果时保留表头。下载沿用现有登录鉴权，失败时提供错误提示。CSV 只包含素材信息，原文件通过素材详情下载。
 
-## 自动化验证与剩余限制
+### 2.4 编辑后查询与导出一致性
 
-本地运行下列命令，测试会自建临时数据。已在干净数据上走完上面的 Harbor 操作，并逐个用四种账号检查可见页面与操作。
+Library 与 Collections 共用素材详情，支持统一编辑标题、描述、标签及所属集合。
+
+保存后，后续关键词查询、标签筛选、集合筛选及 CSV 导出均反映最新数据。保存失败时保留编辑内容，支持重试。
+
+## 3. 补充功能
+
+### 3.1 集合管理
+
+Library 负责跨集合检索和导出，Collections 负责集合浏览及成员管理。
+
+- 可创建空集合、编辑集合描述及批量添加素材。
+- 可在素材详情中添加或移除所属集合。
+- 移除成员或删除集合时，原素材仍可在 Library 中找到。
+- 集合及成员变更后，Library 筛选选项、查询结果和 CSV 导出同步更新。
+
+### 3.2 上传与失败恢复
+
+批量上传时，每个文件独立显示排队、上传中、成功、重复或失败状态，并提供批次结果汇总。单个文件失败后，其余文件继续上传，失败项可独立重试。
+
+用 SHA-256 按文件内容去重。支持单文件大小校验、空文件及损坏图片检测。素材详情及其附属区块加载失败时也可以重试。
+
+## 4. 功能验收
+
+使用 Admin 账号登录，在初始演示数据上进行以下操作。点击截图可查看原图。
+
+| 验收场景 | 操作 | 实测结果 | 验收截图 |
+| --- | --- | --- | --- |
+| 组合筛选 | 搜索 `harbor`，选择 Harbor campaign 集合，类型设为 Image，包含 `approved`、`campaign`，排除 `internal`。 | 16 条。 | [![组合筛选显示 16 条](docs/screenshots/acceptance/01-combined-filters.jpg)](docs/screenshots/acceptance/01-combined-filters.jpg) |
+| 多标签排除 | 继续排除 `restricted`。 | 15 条。 | [![增加 restricted 排除条件后显示 15 条](docs/screenshots/acceptance/02-multiple-exclusions.jpg)](docs/screenshots/acceptance/02-multiple-exclusions.jpg) |
+| 标签冲突 | 在排除 `internal` 的同时，将它加到包含标签。 | 0 条，页面提示标签冲突。 | [![包含和排除 internal 同时生效时显示零条](docs/screenshots/acceptance/03-tag-conflict.jpg)](docs/screenshots/acceptance/03-tag-conflict.jpg) |
+| 分页 | 移除刚加的包含标签 `internal`，浏览上述 15 条结果。 | 第一页 12 条，第二页 3 条。 | [![第二页显示第 13–15 条](docs/screenshots/acceptance/04-second-page.jpg)](docs/screenshots/acceptance/04-second-page.jpg) |
+| 排序 | 在第二页切换为按创建时间最早优先。 | 返回第一页，最早的素材排在前面。 | [![切换最早优先后返回第一页](docs/screenshots/acceptance/05-oldest-first.jpg)](docs/screenshots/acceptance/05-oldest-first.jpg) |
+| 全量导出 | 切回最新优先，翻到第二页，点击 **Export all 15 (CSV)**。 | 实际下载 15 行数据，顺序与当前排序下两页拼接一致。 | [![实际下载的 CSV 表头和全部 15 行](docs/screenshots/acceptance/06-downloaded-csv.jpg)](docs/screenshots/acceptance/06-downloaded-csv.jpg) |
+| 编辑一致性 | 为 Harbor view 01 添加描述 `reviewnote` 并保存，然后搜索该词。 | 搜到该素材，重新下载的 CSV 包含新描述。 | [![保存后搜索 reviewnote 得到一条结果](docs/screenshots/acceptance/07-search-after-edit.jpg)](docs/screenshots/acceptance/07-search-after-edit.jpg) |
+| 集合管理 | 向新集合加入两个素材，再从详情移除其中一个。回到 Library 筛选该集合。 | 列表和 CSV 先后从 2 条变为 1 条。 | [![移除一个成员后集合筛选只剩一条](docs/screenshots/acceptance/08-collection-membership.jpg)](docs/screenshots/acceptance/08-collection-membership.jpg) |
+| 上传恢复 | 模拟单个文件上传中断，再点失败文件的 **Retry**。 | 第二个文件正常上传，重试后两个文件均上传成功。 | [![批次中一项成功、一项失败且可重试](docs/screenshots/acceptance/09-upload-retry.jpg)](docs/screenshots/acceptance/09-upload-retry.jpg) |
+
+以上九项均已通过浏览器验证。第六项截图展示实际下载的 CSV，第九项截图展示点击重试前的状态。
+
+## 5. 技术实现与取舍
+
+| 设计选择 | 原因 |
+| --- | --- |
+| 保留 FastAPI、SQLite / FTS5、原生 JavaScript | 现有技术栈可满足需求，部署和维护继续沿用项目已有方式。 |
+| 统一列表与导出的查询逻辑 | 同一处定义筛选规则，列表与 CSV 采用相同条件。 |
+| 创建时间与 ID 组合排序 | 创建时间相同时仍有确定顺序，分页保持稳定。 |
+| 服务端筛选与分页 | 浏览器按需接收当前页素材。 |
+| 前端异步请求控制 | 快速切换筛选条件时，只有最新请求的结果可以更新页面。 |
+| 编辑与索引更新放在同一事务 | 素材数据和搜索索引一起更新，失败时一起回滚。 |
+| 同步 CSV 导出 | 满足当前数据规模及题目需求。 |
+| 沿用现有角色权限 | 前端按角色提供操作入口，后端独立鉴权。 |
+
+页面设计将检索条件集中在 Library，集合管理集中在 Collections，保留原有素材管理能力。
+
+## 6. 自动化测试
+
+### 运行方式
 
 ```bash
-.venv/bin/python -m pytest -q
-.venv/bin/python -m pip install -e '.[dev,e2e]'
-.venv/bin/python -m playwright install chromium
-.venv/bin/python -m pytest -q tests/e2e_workflows.py
+python -m pytest -q
+
+pip install -e '.[dev,e2e]'
+python -m playwright install chromium
+python -m pytest -q tests/e2e_workflows.py
 ```
 
-[GitHub Actions](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45770028095) 验证提交 `257072fe8eed990b7863eb65db59b8745a1234df`。Python 3.10、3.12 各 42 通过、1 跳过（缺 CLIP 模型），Playwright 11 通过。最终评审提交 SHA 与文档更新后的检查见 [Draft PR](https://github.com/grumpykendal0622/AI-Engineer-Quiz/pull/1)。附有[逐项边界验证](docs/asset-search-stories.md)和[后续清单](TODO.md)。
+测试独立生成临时数据，无需依赖已有数据库。
 
-- **上传与容量。** 图片和其他素材默认单文件上限 1024 MiB，可配置。支持图片、文档、视频和音频，预览随格式而异。空文件和损坏的光栅图会被拒绝。按文件内容去重，重试会从该文件开头上传。CSV 测过 207 条，浏览器会先接收完整文件。列表与 CSV 的一致性以数据不变为前提。
-- **未完成及范围外。** 分享、删除素材及 Users／Dashboard 的失败提示还有改进空间。保留现有相似素材和留存日期功能。后台导出、实时同步、语义检索优化、自动留存和在线部署均在本题范围外。
+### 测试结果
 
-## 关键页面截图
+| 测试环境 | 通过 | 失败 | 跳过 |
+| --- | ---: | ---: | ---: |
+| Python 3.10 | 42 | 0 | 1 |
+| Python 3.12 | 42 | 0 | 1 |
+| Playwright E2E | 11 | 0 | 0 |
 
-**Library 集合选择器。** 输入 `harbor` 后可以选中 Harbor campaign，再叠加标签和素材类型。
+跳过的是依赖 CLIP 模型的测试。
 
-![Library 集合选择器按名称搜索 Harbor campaign](docs/screenshots/quiz-collection-picker.jpg)
+### 主要测试覆盖
 
-**分页与 CSV。** 当前页显示第 13–15 条，按钮仍会导出全部 15 条。
+| 测试范围 | 覆盖内容 |
+| --- | --- |
+| 组合筛选 | 条件交集、多标签、完整名称匹配、大小写、重复及冲突标签、素材状态 |
+| 排序与分页 | 升降序、相同创建时间、跨页重复与遗漏、筛选变更、旧请求晚到 |
+| CSV 导出 | 多页结果一致性、207 条数据导出、素材类型、特殊字符、空结果、鉴权及下载失败 |
+| 编辑一致性 | 新旧关键词、标签增删、集合成员变更、索引更新及事务回滚 |
+| 集合管理 | 创建、删除、重复添加、批量操作、描述编辑及原素材保留 |
+| 上传与异常恢复 | 内容去重、无效文件、大小限制、网络中断及单文件重试 |
+| 权限控制 | 四种角色、未登录请求及越权操作 |
 
-![Library 第二页与全量 CSV 入口](docs/screenshots/quiz-library-export.jpg)
+[GitHub Actions 测试记录](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45771011402) | [详细验证记录](docs/asset-search-stories.md)
 
-**Collections。** 集合内先读描述，再看成员，有权限时可点 Add assets。
+## 7. 已知限制与未完成项
 
-![集合描述、成员与添加入口](docs/screenshots/quiz-collection-members.jpg)
+题目要求的四项核心功能均已完成。
 
-**素材详情。** 在同一表单改描述、标签和所属集合，并统一保存。
+- **大规模导出。** 已验证 207 条素材的导出一致性。超大规模数据的容量和性能仍待测量。
+- **并发修改。** 分页及导出的一致性以数据不变为前提。跨请求快照和多人编辑冲突检测未实现。
+- **上传恢复。** 支持单文件重试。每次重试从该文件开头重新上传。
+- **异常处理。** 分享、素材删除及部分后台管理页面的错误提示还有完善空间。[后续清单](TODO.md)
 
-![素材详情编辑表单与 Save changes](docs/screenshots/quiz-asset-editor.jpg)
-
-**Viewer。** 可在 Library 搜索和导出，界面隐藏 Upload 和管理页。
-
-![Viewer 的只读 Library](docs/screenshots/quiz-viewer-library.jpg)
-
-**上传中断。** 界面保留成功项，在失败文件一行提供 Retry。
-
-![单文件上传失败和重试入口](docs/screenshots/quiz-upload-retry.jpg)
+语义检索优化、异步导出、实时同步及线上部署属于题目范围之外。
