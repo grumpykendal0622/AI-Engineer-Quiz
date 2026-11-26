@@ -113,9 +113,9 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .exclude-filter { --filter-sign: #8b451e; --filter-bg: #fff1e8; }
 .tag-filter { display: grid; align-content: space-between; gap: 5px; }
 .tag-filter small { display: block; color: var(--muted); line-height: 1.3; }
-.tag-filter summary { cursor: pointer; list-style: none; background: var(--base-0); border: 1px solid var(--base-3); border-radius: var(--radius-sm); padding: 8px; min-height: 38px; }
-.tag-filter summary::-webkit-details-marker { display: none; }
-.tag-filter summary:hover, .tag-filter details[open] summary { border-color: var(--accent); }
+.tag-filter summary, .edit-picker summary { cursor: pointer; list-style: none; background: var(--base-0); border: 1px solid var(--base-3); border-radius: var(--radius-sm); padding: 8px; min-height: 38px; }
+.tag-filter summary::-webkit-details-marker, .edit-picker summary::-webkit-details-marker { display: none; }
+.tag-filter summary:hover, .tag-filter details[open] summary, .edit-picker summary:hover, .edit-picker[open] summary { border-color: var(--accent); }
 .tag-picker-actions { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 5px; }
 .tag-picker-actions .btn { padding: 5px 7px; font-size: 12px; }
 .tag-picker-actions .btn:disabled { opacity: .5; cursor: default; }
@@ -208,7 +208,11 @@ button, input, select { font-family: inherit; font-size: inherit; }
   border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; padding: 4px var(--s2); font-size: 13px;
 }
 .tag .rm { font: inherit; border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0 3px; }
-.tag-add { background: var(--base-0); border: 1px dashed var(--base-3); border-radius: 999px; padding: 4px var(--s2); color: var(--text); width: 120px; }
+.edit-picker { --filter-sign: var(--accent); --filter-bg: var(--accent-dim); margin-top: var(--s1); }
+.edit-picker summary { width: fit-content; }
+.edit-picker .tag-picker { position: static; width: min(100%, 360px); margin-top: var(--s1); }
+.edit-picker-actions { justify-content: flex-end; }
+.edit-picker-create { margin-inline-end: auto; max-width: 100%; overflow-wrap: anywhere; }
 .similar-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }
 .similar-strip img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-sm); cursor: pointer; border: 1px solid var(--base-3); }
 .kv-scroll { max-height: 260px; overflow: auto; background: var(--base-0); border-radius: var(--radius-sm); padding: var(--s2); }
@@ -273,7 +277,6 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .picker-choice img { grid-column: 1 / -1; width: 100%; height: 60px; object-fit: cover; border-radius: var(--radius-sm); }
 .picker-choice small { grid-column: 2; }
 .picker-choice:has(input:checked) { border-color: var(--accent); background: var(--accent-dim); }
-.edit-collections select { width: auto; max-width: 100%; min-height: 34px; padding: 4px 8px; color: var(--text); background: var(--base-0); border: 1px solid var(--base-3); border-radius: var(--radius-sm); }
 
 /* ---------- toast ---------- */
 .toast {

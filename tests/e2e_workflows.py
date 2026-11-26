@@ -181,10 +181,16 @@ def test_collections_and_one_save_edit_round_trip(page):
     locator("#e-title").fill(title)
     description = '图注, "新版"\n第二行'
     locator("#e-description").fill(description)
-    locator("#tag-add").fill('team/brand, "中文"')
-    locator("#tag-add").press("Enter")
+    tags = locator("#edit-tag-picker")
+    tags.locator("summary").click()
+    tags.locator("input").fill('team/brand, "中文"')
+    tags.get_by_role("button", name="Create").click()
     locator("#asset-collection-row").get_by_role("button", name="Remove from collection: Browser review").click()
-    locator("#asset-collection-add").select_option(label="Harbor campaign")
+    collections = locator("#edit-collection-picker")
+    collections.locator("summary").click()
+    collections.locator("input").fill("Harbor")
+    collections.get_by_role("button", name="Harbor campaign", exact=True).click()
+    collections.get_by_role("button", name="Add selected (1)", exact=True).click()
     expect(locator("#collection-count")).to_have_text("13 assets")
     page.route(f"**/api/assets/{uuid}", lambda route: route.fulfill(status=409, body="test-stale-collection"), times=1)
     locator("#d-save").click()
@@ -229,6 +235,7 @@ def test_viewer_session_and_filter_directory_failure(page):
     locator("#collection-grid .card").first.click()
     expect(locator("#d-download")).to_be_visible()
     expect(locator("#d-save")).to_have_count(0)
+    expect(locator(".edit-picker")).to_have_count(0)
     locator("#drawer-close").click()
     page.set_viewport_size({"width": 360, "height": 800})
     page.route("**/api/tags", lambda route: route.fulfill(status=500, body="test-failure"), times=1)
@@ -270,3 +277,52 @@ def test_upload_feedback_and_open_audit_refresh(page):
     locator("#upload-cancel").click()
     expect(locator("#audit-rows")).to_contain_text("created.csv")
     expect(locator("#audit-rows")).not_to_contain_text("renamed.csv")
+
+
+def test_matching_asset_pickers_keep_draft_until_save(page, base_url):
+    login(page)
+    locator = page.locator
+    token = page.evaluate("localStorage.getItem('keepstack_token')")
+    headers = {"Authorization": "Bearer " + token}
+    for number in range(10):
+        created = page.request.post(base_url + "/api/collections", headers=headers, data={"name": f"Picker test {number:02}"})
+        assert created.ok
+    card = locator("#grid .card", has_text="Library reading room (alt)")
+    uuid = card.get_attribute("data-uuid")
+    card.click()
+    tags = locator("#edit-tag-picker")
+    collections = locator("#edit-collection-picker")
+    tags.locator("summary").press("Enter")
+    expect(tags.locator(".tag-page")).to_contain_text("1 /")
+    expect(tags.locator(".tag-options button")).to_have_count(8)
+    expect(tags.get_by_role("button", name="Previous", exact=True)).to_be_disabled()
+    tags.get_by_role("button", name="Next", exact=True).click()
+    expect(tags.locator(".tag-page")).to_contain_text("2 /")
+    tags.locator("input").fill("library")
+    expect(tags.get_by_role("button", name="library · Already added", exact=True)).to_be_disabled()
+    tags.locator("input").fill("approved")
+    tags.get_by_role("button", name="approved", exact=True).click()
+    tags.locator("input").fill("campaign")
+    tags.get_by_role("button", name="campaign", exact=True).click()
+    expect(locator("#tag-row")).not_to_contain_text("approved")
+    tags.get_by_role("button", name="Add selected (2)", exact=True).click()
+    expect(locator("#tag-row")).to_contain_text("approved")
+    expect(locator("#tag-row")).to_contain_text("campaign")
+    collections.locator("summary").click()
+    expect(collections.locator(".tag-options button")).to_have_count(8)
+    collections.get_by_role("button", name="Next", exact=True).click()
+    expect(collections.locator(".tag-page")).to_contain_text("2 /")
+    collections.locator("input").fill("Picker test 09")
+    collections.get_by_role("button", name="Picker test 09", exact=True).click()
+    expect(locator("#asset-collection-row")).not_to_contain_text("Picker test")
+    collections.get_by_role("button", name="Add selected (1)", exact=True).click()
+    expect(locator("#asset-collection-row")).to_contain_text("Picker test 09")
+    detail = base_url + "/api/assets/" + uuid
+    before = page.request.get(detail, headers=headers).json()
+    assert "approved" not in {tag["name"] for tag in before["tags"]}
+    assert "Picker test 09" not in {item["name"] for item in before["collections"]}
+    locator("#d-save").click()
+    expect(locator("#edit-message")).to_have_text("Saved")
+    after = page.request.get(detail, headers=headers).json()
+    assert {"approved", "campaign"} <= {tag["name"] for tag in after["tags"]}
+    assert "Picker test 09" in {item["name"] for item in after["collections"]}

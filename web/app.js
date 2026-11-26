@@ -278,12 +278,7 @@ function renderTagOptions(key) {
   const picker = tagPickers[key];
   const query = $("input", picker).value.trim().toLowerCase();
   const names = [...new Set([...recentTags, ...tagCatalog])].filter(name => name.toLowerCase().includes(query));
-  const list = $(".tag-options", picker);
-  const pageCount = Math.max(1, Math.ceil(names.length / tagPageSize));
-  const page = Math.min(Number(picker.dataset.page || 0), pageCount - 1);
-  picker.dataset.page = String(page);
-  list.replaceChildren();
-  for (const name of names.slice(page * tagPageSize, (page + 1) * tagPageSize)) {
+  renderPickerPage(picker, names, query ? "No tag names found." : "No tags available.", name => {
     const button = document.createElement("button");
     button.className = "btn";
     button.type = "button";
@@ -296,12 +291,30 @@ function renderTagOptions(key) {
       else { toast("Choose at most 100 tags per group", "err"); return; }
       updateFilters();
     });
-    list.append(button);
-  }
-  if (!names.length) list.textContent = query ? "No tag names found." : "No tags available.";
+    return button;
+  });
+}
+
+function renderPickerPage(picker, items, emptyText, createOption) {
+  const list = $(".tag-options", picker);
+  const pageCount = Math.max(1, Math.ceil(items.length / tagPageSize));
+  const page = Math.max(0, Math.min(Number(picker.dataset.page || 0), pageCount - 1));
+  picker.dataset.page = String(page);
+  list.replaceChildren(...items.slice(page * tagPageSize, (page + 1) * tagPageSize).map(createOption));
+  if (!items.length) list.textContent = emptyText;
   $(".tag-prev", picker).disabled = page === 0;
   $(".tag-next", picker).disabled = page + 1 === pageCount;
-  $(".tag-page", picker).textContent = names.length ? `${page + 1} / ${pageCount}` : "0 tags";
+  $(".tag-page", picker).textContent = items.length ? `${page + 1} / ${pageCount}` : "0 results";
+}
+
+function bindPickerPages(picker, render) {
+  $("input", picker).addEventListener("input", () => { picker.dataset.page = "0"; render(); });
+  for (const [selector, step] of [[".tag-prev", -1], [".tag-next", 1]]) {
+    $(selector, picker).addEventListener("click", () => {
+      picker.dataset.page = String(Number(picker.dataset.page) + step);
+      render();
+    });
+  }
 }
 
 for (const [key, picker] of Object.entries(tagPickers)) {
@@ -314,13 +327,7 @@ for (const [key, picker] of Object.entries(tagPickers)) {
       renderTagOptions(key);
     }
   });
-  $("input", picker).addEventListener("input", () => { picker.dataset.page = "0"; renderTagOptions(key); });
-  for (const [selector, step] of [[".tag-prev", -1], [".tag-next", 1]]) {
-    $(selector, picker).addEventListener("click", () => {
-      picker.dataset.page = String(Number(picker.dataset.page) + step);
-      renderTagOptions(key);
-    });
-  }
+  bindPickerPages(picker, () => renderTagOptions(key));
   $(".tag-done", picker).addEventListener("click", closePicker);
   picker.addEventListener("keydown", event => {
     if (event.key === "Escape") closePicker();
@@ -429,6 +436,27 @@ function dublinCoreRows(dc) {
     `<div class="field-row"><span class="k">${esc(key)}</span><span class="v">${esc(value)}</span></div>`).join("");
 }
 
+function editPickerMarkup(kind, plural) {
+  return `<details class="edit-picker" id="edit-${kind}-picker">
+    <summary>＋ Add ${plural}</summary>
+    <div class="tag-picker">
+      <label class="filter-field">Find ${plural}<input id="edit-${kind}-search" type="search"
+        placeholder="Search ${kind} names" autocomplete="off"></label>
+      <div class="tag-options"></div>
+      <div class="tag-picker-actions">
+        <button class="btn tag-prev" type="button">Previous</button>
+        <span class="tag-page muted" aria-live="polite"></span>
+        <button class="btn tag-next" type="button">Next</button>
+      </div>
+      <div class="btn-row edit-picker-actions">
+        ${kind === "tag" ? '<button class="btn edit-picker-create hidden" type="button"></button>' : ""}
+        <button class="btn edit-picker-cancel" type="button">Cancel</button>
+        <button class="btn btn-primary edit-picker-apply" type="button" disabled>Add selected</button>
+      </div>
+    </div>
+  </details>`;
+}
+
 async function openAsset(uuid) {
   if (!canLeaveAsset()) return;
   canLeaveAsset = () => true;
@@ -472,17 +500,12 @@ async function openAsset(uuid) {
       <div class="edit-tags">
         <h4>Tags</h4>
         <div class="tag-row" id="tag-row"></div>
-        <div class="btn-row">
-          <input class="tag-add" id="tag-add" aria-label="New tag" placeholder="Enter a tag" autocomplete="off">
-          <button class="btn" id="tag-stage" type="button">Add tag</button>
-        </div>
+        ${editPickerMarkup("tag", "tags")}
       </div>
       <div class="edit-tags edit-collections">
         <h4>Collections</h4>
         <div class="tag-row" id="asset-collection-row"></div>
-        <div class="btn-row">
-          <select id="asset-collection-add" aria-label="Add to collection"></select>
-        </div>
+        ${editPickerMarkup("collection", "collections")}
         <p class="muted edit-tag-help">Save to apply tag and collection changes. Removing a collection here does not delete the asset.</p>
       </div>
       <div class="btn-row"><button class="btn btn-primary" id="d-save" type="submit" disabled>Save changes</button>
@@ -562,13 +585,83 @@ function renderDetailChips(row, items, kind, removeItem) {
   }
 }
 
+function bindEditPicker(picker, options, alreadyAdded, apply, create) {
+  const summary = $("summary", picker);
+  const input = $("input", picker);
+  const add = $(".edit-picker-apply", picker);
+  const createButton = $(".edit-picker-create", picker);
+  const pending = new Map();
+  const close = () => {
+    picker.open = false;
+    pending.clear();
+    summary.focus({ preventScroll: true });
+  };
+  const render = () => {
+    const text = input.value.trim().toLowerCase();
+    const items = options();
+    const matches = items.filter(item => item.name.toLowerCase().includes(text));
+    renderPickerPage(picker, matches, text ? "No matches found." : "No options available.", item => {
+      const present = alreadyAdded(item);
+      const button = document.createElement("button");
+      button.className = "btn";
+      button.type = "button";
+      button.textContent = present ? item.name + " · Already added" : item.name;
+      button.disabled = present;
+      button.setAttribute("aria-pressed", String(pending.has(item.key)));
+      button.addEventListener("click", () => {
+        if (pending.has(item.key)) pending.delete(item.key);
+        else pending.set(item.key, item);
+        button.setAttribute("aria-pressed", String(pending.has(item.key)));
+        syncPending();
+      });
+      return button;
+    });
+    if (createButton) {
+      createButton.classList.toggle("hidden", !text || items.some(item => item.name.toLowerCase() === text)
+        || alreadyAdded({ name: text }));
+      createButton.textContent = `Create “${text}”`;
+    }
+    syncPending();
+  };
+  function syncPending() {
+    add.disabled = pending.size === 0;
+    add.textContent = pending.size ? `Add selected (${pending.size})` : "Add selected";
+  }
+  bindPickerPages(picker, render);
+  summary.addEventListener("click", () => {
+    if (picker.open) return;
+    $$(".edit-picker", picker.closest("form")).filter(other => other !== picker).forEach(other => { other.open = false; });
+    input.value = "";
+    pending.clear();
+    picker.dataset.page = "0";
+    render();
+  });
+  picker.addEventListener("keydown", event => {
+    if (event.key === "Escape" && picker.open) {
+      event.preventDefault();
+      close();
+    } else if (event.key === "Enter" && event.target === input && !event.isComposing) {
+      event.preventDefault();
+    }
+  });
+  $(".edit-picker-cancel", picker).addEventListener("click", close);
+  add.addEventListener("click", () => {
+    apply([...pending.values()]);
+    close();
+  });
+  createButton?.addEventListener("click", () => {
+    apply([...pending.values(), create(input.value.trim().toLowerCase())]);
+    close();
+  });
+  return () => { if (picker.open) render(); };
+}
+
 function bindAssetEditor(uuid, tags, collections) {
   const form = $("#asset-edit");
   const fieldset = $("fieldset", form);
-  const input = $("#tag-add");
   const save = $("#d-save");
-  const add = $("#tag-stage");
-  const addCollection = $("#asset-collection-add");
+  const tagPicker = $("#edit-tag-picker");
+  const collectionPicker = $("#edit-collection-picker");
   const message = $("#edit-message");
   const fields = ["title", "description", "alt_text", "dc_creator", "rights_statement", "retention_until"];
   const readFields = () => Object.fromEntries(fields.map(name => [name, $("#e-" + name, form).value]));
@@ -578,56 +671,46 @@ function bindAssetEditor(uuid, tags, collections) {
   let savedCollectionIds = collectionIds();
   const tagsChanged = () => JSON.stringify(names()) !== JSON.stringify(savedNames);
   const collectionsChanged = () => JSON.stringify(collectionIds()) !== JSON.stringify(savedCollectionIds);
-  const dirty = () => Boolean(input.value.trim()) || tagsChanged() || collectionsChanged()
+  const dirty = () => tagsChanged() || collectionsChanged()
     || fields.some(name => $("#e-" + name, form).value !== savedFields[name]);
   canLeaveAsset = () => !fieldset.disabled && (!dirty() || confirm("Discard unsaved changes?"));
-  const sync = () => { save.disabled = fieldset.disabled || !dirty(); add.disabled = !input.value.trim(); };
+  const sync = () => { save.disabled = fieldset.disabled || !dirty(); };
+  const changed = () => { message.textContent = ""; sync(); };
   const renderTags = () => renderDetailChips($("#tag-row"), tags, "tag", item => {
     tags = tags.filter(tag => tag.name !== item.name);
     renderTags();
-    input.focus({ preventScroll: true });
-    sync();
+    $("summary", tagPicker).focus({ preventScroll: true });
+    refreshTagPicker();
+    changed();
   });
-  const renderCollections = () => {
-    renderDetailChips($("#asset-collection-row"), collections, "collection", item => {
-      collections = collections.filter(collection => collection.id !== item.id);
-      renderCollections();
-      addCollection.focus({ preventScroll: true });
-      sync();
-    });
-    const options = collectionCatalog.filter(item => !collections.some(collection => collection.id === item.id));
-    addCollection.replaceChildren(new Option("+ Add to collection", ""),
-      ...options.map(item => new Option(item.name, item.id)));
-    addCollection.disabled = options.length === 0;
-  };
-  addCollection.addEventListener("change", () => {
-    const item = collectionCatalog.find(collection => collection.id === Number(addCollection.value));
-    if (item) collections = [...collections, item];
+  const renderCollections = () => renderDetailChips($("#asset-collection-row"), collections, "collection", item => {
+    collections = collections.filter(collection => collection.id !== item.id);
     renderCollections();
-    sync();
+    $("summary", collectionPicker).focus({ preventScroll: true });
+    refreshCollectionPicker();
+    changed();
   });
-  const stageTag = () => {
-    const name = input.value.trim().toLowerCase();
-    if (!name) return;
-    if (!tags.some(tag => tag.name === name)) {
-      tags = [...tags, savedTags.find(tag => tag.name === name) || { name, source: "manual" }];
+  const newTag = name => savedTags.find(tag => tag.name === name) || { name, source: "manual" };
+  const refreshTagPicker = bindEditPicker(tagPicker,
+    () => [...new Set([...recentTags, ...tagCatalog, ...names()])].map(name => ({ ...newTag(name), key: name })),
+    item => tags.some(tag => tag.name === item.name), items => {
+      for (const item of items) if (!tags.some(tag => tag.name === item.name)) tags = [...tags, item];
       renderTags();
-    }
-    input.value = "";
-    sync();
-  };
-  add.addEventListener("click", () => { stageTag(); input.focus({ preventScroll: true }); });
-  input.addEventListener("keydown", event => {
-    if (event.key === "Enter" && !event.isComposing) {
-      event.preventDefault();
-      stageTag();
-    }
+      changed();
+    }, newTag);
+  const refreshCollectionPicker = bindEditPicker(collectionPicker,
+    () => collectionCatalog.map(item => ({ ...item, key: item.id })),
+    item => collections.some(collection => collection.id === item.id), items => {
+      for (const item of items) if (!collections.some(collection => collection.id === item.id)) collections = [...collections, item];
+      renderCollections();
+      changed();
+    });
+  form.addEventListener("input", event => {
+    if (!event.target.closest(".edit-picker")) changed();
   });
-  form.addEventListener("input", () => { message.textContent = ""; sync(); });
   form.addEventListener("submit", async event => {
     event.preventDefault();
     if (fieldset.disabled) return;
-    stageTag();
     if (!dirty()) return;
     const values = readFields();
     const body = Object.fromEntries(fields.filter(name => values[name] !== savedFields[name])
@@ -669,7 +752,9 @@ function bindAssetEditor(uuid, tags, collections) {
   });
   renderTags();
   renderCollections();
-  loadCollectionCatalog().then(() => { if (form.isConnected) renderCollections(); });
+  loadFilterOptions().then(() => {
+    if (form.isConnected) { refreshTagPicker(); refreshCollectionPicker(); }
+  });
   sync();
 }
 
