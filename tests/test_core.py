@@ -399,6 +399,8 @@ def test_asset_edit_saves_membership_with_tags_and_metadata(library_client, harb
         assert library_client.get("/api/assets", params={**params, "collection_id": original_collection}).json()["total"] == 0
         row, = read_export(library_client.get("/api/assets/export.csv", params={**params, "collection_id": collection}))
         assert row["uuid"] == asset["uuid"]
+        assert any(entry["action"] == "collection.remove" and entry["target_id"] == str(original_collection)
+                   and entry["detail"] == asset["uuid"] for entry in library_client.get("/api/audit").json()["entries"])
         assert library_client.patch(path, json={"collection_ids": []}).json()["collections"] == []
         assert library_client.get("/api/assets", params=params).json()["total"] == 1
     finally:
@@ -456,6 +458,73 @@ def test_upload_limits_and_mixed_batch(library_client, monkeypatch):
     for _, spec in specs[1:4]:
         single = library_client.post(path, data=data, files={"files": spec})
         assert single.status_code == (413 if spec[0] == "over-limit.csv" else 422)
+
+
+def test_legacy_slash_tag_removal_reindexes_and_audits(library_client, harbor_demo, monkeypatch):
+    from urllib.parse import quote
+
+    _, assets = harbor_demo
+    asset = assets["Harbor view 06"]
+    path = f"/api/assets/{asset['uuid']}"
+    monkeypatch.setattr(ai, "embed_image", lambda path: None)
+    monkeypatch.setattr(ai, "embed", ai._local_embed)
+    ingest.reindex_embedding(asset["id"])
+    conn = get_conn()
+
+    def embedding():
+        return conn.execute("SELECT embedding FROM assets WHERE id = ?", (asset["id"],)).fetchone()["embedding"]
+
+    original = embedding()
+    tag = "qa/slash-vector"
+    assert library_client.post(path + "/tags", json={"name": tag}).status_code == 200
+    assert embedding() != original
+    assert library_client.get("/api/assets", params={"q": "slash-vector"}).json()["total"] == 1
+    assert library_client.delete(path + "/tags/" + quote(tag, safe="")).status_code == 200
+    assert library_client.get("/api/assets", params={"q": "slash-vector"}).json()["total"] == 0
+    assert embedding() == original
+    assert any(entry["action"] == "tag.remove" and entry["detail"] == tag
+               for entry in library_client.get("/api/audit").json()["entries"])
+
+
+def test_retention_validation_and_share_expiry_and_revocation(library_client, harbor_demo):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 07"]
+    path = f"/api/assets/{asset['uuid']}"
+    assert library_client.patch(path, json={"retention_until": "2026-02-30"}).status_code == 422
+    assert library_client.patch(path, json={"retention_until": "2032-02-29"}).json()["asset"]["retention_until"] == "2032-02-29"
+    assert library_client.patch(path, json={"retention_until": ""}).json()["asset"]["retention_until"] == ""
+    payload = {"target_id": asset["id"], "permission": "download"}
+    assert library_client.post("/api/shares", json={**payload, "expires_at": "tomorrow-ish"}).status_code == 422
+    expired = library_client.post("/api/shares", json={**payload, "expires_at": "2000-01-01T12:00:00-05:00"}).json()["token"]
+    assert library_client.get(f"/s/{expired}").status_code == 410
+    active = library_client.post("/api/shares", json={**payload, "expires_at": "2099-01-01T00:00:00Z"}).json()["token"]
+    assert library_client.get(f"/s/{active}/file").status_code == 200
+    share_id = next(share["id"] for share in library_client.get("/api/shares").json()["shares"] if share["token"] == active)
+    assert library_client.delete(f"/api/shares/{share_id}").status_code == 200
+    assert library_client.get(f"/s/{active}/file").status_code == 404
+
+
+def test_csv_can_export_more_than_maximum_list_page(library_client):
+    collection = library_client.post("/api/collections", json={"name": "Volume test"}).json()["id"]
+    conn = get_conn()
+    uuids = [f"csv-volume-{number:03}" for number in range(207)]
+    try:
+        conn.executemany(
+            "INSERT INTO assets (uuid, sha256, filename, title, storage_key, created_at, updated_at) VALUES "
+            "(?, 'fixture', 'fixture.txt', 'Fixture', 'unused', '2026-07-31', '2026-07-31')",
+            ((uuid,) for uuid in uuids),
+        )
+        conn.execute("INSERT INTO collection_assets (collection_id, asset_id) "
+                     "SELECT ?, id FROM assets WHERE uuid LIKE 'csv-volume-%'", (collection,))
+        conn.commit()
+        params = {"collection_id": collection, "sort": "oldest"}
+        first = library_client.get("/api/assets", params={**params, "limit": 200}).json()
+        assert first["total"] == 207 and len(first["items"]) == 200
+        assert [row["uuid"] for row in read_export(library_client.get("/api/assets/export.csv", params=params))] == uuids
+    finally:
+        conn.execute("DELETE FROM assets WHERE uuid LIKE 'csv-volume-%'")
+        conn.commit()
+        library_client.delete(f"/api/collections/{collection}")
 
 
 def test_semantic_search_returns_ranked_results():
