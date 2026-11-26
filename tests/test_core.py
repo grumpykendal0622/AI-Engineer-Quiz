@@ -428,6 +428,36 @@ def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
         assert library_client.delete("/api/collections/999999", headers=headers).status_code == (404 if role == "editor" else 403)
 
 
+def test_upload_limits_and_mixed_batch(library_client, monkeypatch):
+    from keepstack.config import config
+
+    monkeypatch.setattr(config, "max_upload_mb", 1)
+    path = "/api/assets"
+    data = {"run_ai": "false"}
+    limit = 1024 * 1024
+    image = _img_bytes(color=(38, 105, 179), size=(121, 91))
+    specs = [
+        ("files", ("at-limit.csv", b"A" * limit, "text/csv")),
+        ("files", ("over-limit.csv", b"B" * (limit + 1), "text/csv")),
+        ("files", ("blank.txt", b"", "text/plain")),
+        ("files", ("invalid.png", b"not an image", "image/png")),
+        ("files", ("real.jpg", image, "image/jpeg")),
+    ]
+    result = library_client.post(path, data=data, files=specs)
+    assert result.status_code == 200
+    assert [failure["status"] for failure in result.json()["failed"]] == [413, 422, 422]
+    exact, photo = result.json()["created"]
+    assert library_client.get(f"/api/assets/{exact['uuid']}").json()["asset"]["size"] == limit
+    renamed = library_client.post(path, data=data, files={"files": ("renamed.jpg", image, "image/jpeg")})
+    assert renamed.json()["created"][0]["duplicate"] is True
+    assert renamed.json()["created"][0]["uuid"] == photo["uuid"]
+    changed = library_client.post(path, data=data, files={"files": ("real.jpg", _img_bytes(color=(38, 100, 179)), "image/jpeg")})
+    assert changed.json()["created"][0]["duplicate"] is False
+    for _, spec in specs[1:4]:
+        single = library_client.post(path, data=data, files={"files": spec})
+        assert single.status_code == (413 if spec[0] == "over-limit.csv" else 422)
+
+
 def test_semantic_search_returns_ranked_results():
     ingest.ingest_stream(io.BytesIO(_img_bytes(color=(40, 150, 90), size=(330, 500))),
                          "mountain_trail.jpg", title="Mountain trail in the alpine forest")

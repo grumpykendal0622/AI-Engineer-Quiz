@@ -32,7 +32,15 @@ async function api(path, opts = {}) {
     }
     throw new Error("unauthorised");
   }
-  if (!res.ok) { const t = await res.text(); throw new Error(t || res.statusText); }
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text || res.statusText;
+    try {
+      const detail = JSON.parse(text).detail;
+      if (typeof detail === "string") message = detail;
+    } catch {}
+    throw new Error(message);
+  }
   return !opts.raw && res.headers.get("content-type")?.includes("json") ? res.json() : res;
 }
 
@@ -104,6 +112,9 @@ function logout() {
     $(selector).replaceChildren();
   }
   $("#file-input").value = "";
+  uploadBatch = [];
+  uploadBusy = false;
+  syncUploadBatch();
   $$(".admin-only").forEach(element => element.classList.add("hidden"));
   $("#app").classList.add("hidden");
   $("#login-error").classList.add("hidden");
@@ -664,10 +675,16 @@ function bindAssetEditor(uuid, tags, collections) {
 
 // ---------- upload ----------
 const uploadModal = $("#upload-modal");
-$("#btn-upload").addEventListener("click", () => { uploadModal.classList.remove("hidden"); document.body.classList.add("modal-open"); });
+let uploadBatch = [], uploadBusy = false;
+$("#btn-upload").addEventListener("click", () => {
+  uploadModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  (dz.disabled ? $("#upload-cancel") : dz).focus();
+});
 function closeUpload() {
   uploadModal.classList.add("hidden");
   document.body.classList.remove("modal-open");
+  $("#btn-upload").focus();
 }
 $("#upload-cancel").addEventListener("click", closeUpload);
 $(".modal-backdrop").addEventListener("click", closeUpload);
@@ -676,26 +693,73 @@ dz.addEventListener("click", () => fileInput.click());
 dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag"); });
 dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
 dz.addEventListener("drop", e => { e.preventDefault(); dz.classList.remove("drag"); uploadFiles(e.dataTransfer.files); });
-fileInput.addEventListener("change", () => uploadFiles(fileInput.files));
+fileInput.addEventListener("change", () => {
+  const files = [...fileInput.files];
+  fileInput.value = "";
+  uploadFiles(files);
+});
+uploadModal.addEventListener("keydown", event => { if (event.key === "Escape") closeUpload(); });
 
-async function uploadFiles(files) {
-  const session = sessionVersion;
-  let added = false;
+function uploadFiles(files) {
+  if (uploadBusy || !files.length) return;
   const list = $("#upload-list");
-  for (const file of files) {
+  list.replaceChildren();
+  uploadBatch = [...files].map(file => {
     const row = document.createElement("div");
-    row.className = "upload-item"; row.innerHTML = `<span>${esc(file.name)}</span><span>uploading...</span>`;
-    list.prepend(row);
-    const fd = new FormData(); fd.append("files", file); fd.append("run_ai", $("#ai-toggle").checked);
-    try {
-      const r = await api("/api/assets", { method: "POST", body: fd });
-      if (session !== sessionVersion) return;
-      const created = r.created[0];
-      added ||= !created.duplicate;
-      row.classList.add(created.duplicate ? "dup" : "ok");
-      row.lastChild.textContent = created.duplicate ? "duplicate (deduped)" : "done";
-    } catch (err) { row.classList.add("err"); row.lastChild.textContent = "failed"; }
+    row.className = "upload-item";
+    row.innerHTML = `<span>${esc(file.name)}</span><span class="upload-status"></span><button type="button" class="btn hidden">Retry</button>`;
+    list.append(row);
+    const item = { file, row, state: "queued", error: "", runAI: $("#ai-toggle").checked };
+    $("button", row).setAttribute("aria-label", "Retry " + file.name);
+    $("button", row).addEventListener("click", () => uploadItems([item]));
+    return item;
+  });
+  uploadItems(uploadBatch);
+}
+
+function syncUploadBatch() {
+  const counts = { ok: 0, dup: 0, err: 0, pending: 0 };
+  dz.disabled = uploadBusy;
+  for (const item of uploadBatch) {
+    item.row.className = "upload-item " + item.state;
+    $(".upload-status", item.row).textContent = {
+      queued: "Queued", sending: "Uploading…", ok: "Uploaded", dup: "Already exists", err: "Failed — " + item.error,
+    }[item.state];
+    $("button", item.row).classList.toggle("hidden", item.state !== "err");
+    $("button", item.row).disabled = uploadBusy;
+    if (item.state in counts) counts[item.state]++;
+    else counts.pending++;
   }
+  $("#upload-summary").textContent = !uploadBatch.length ? "" : [
+    `${counts.ok} uploaded`, `${counts.dup} already exists`, `${counts.err} failed`,
+    ...(counts.pending ? [`${counts.pending} pending`] : []),
+  ].join(" · ");
+}
+
+async function uploadItems(items) {
+  if (uploadBusy) return;
+  const session = sessionVersion;
+  uploadBusy = true;
+  let added = false;
+  for (const item of items) {
+    item.state = "sending";
+    syncUploadBatch();
+    const body = new FormData();
+    body.append("files", item.file);
+    body.append("run_ai", item.runAI);
+    try {
+      const result = await api("/api/assets", { method: "POST", body });
+      if (session !== sessionVersion) return;
+      item.state = result.created[0].duplicate ? "dup" : "ok";
+      added ||= item.state === "ok";
+    } catch (error) {
+      if (session !== sessionVersion) return;
+      item.state = "err";
+      item.error = error.message.length <= 150 && error.message || "Upload failed. Please try again.";
+    }
+  }
+  uploadBusy = false;
+  syncUploadBatch();
   if (added && session === sessionVersion) { loadLibrary(); loadFilterOptions(); }
 }
 
