@@ -107,11 +107,15 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .library-filters { padding: var(--s3); margin-bottom: var(--s3); background: var(--base-1); border: 1px solid var(--base-3); border-radius: var(--radius); }
 .filter-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: stretch; gap: var(--s2); margin-top: var(--s2); }
 .filter-field { display: grid; align-content: center; gap: 5px; min-width: 0; font-weight: 600; }
+.filter-options > .filter-field { align-content: space-between; }
 .filter-field input, .filter-field select { width: 100%; font: inherit; font-weight: 400; min-height: 38px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--base-3); color: var(--text); background: var(--base-0); }
 .tag-filter { position: relative; min-width: 0; --filter-sign: #146447; --filter-bg: #eaf7f1; }
 .exclude-filter { --filter-sign: #8b451e; --filter-bg: #fff1e8; }
-.tag-filter summary { cursor: pointer; color: var(--filter-sign); background: var(--filter-bg); border: 1px solid currentColor; border-radius: var(--radius-sm); padding: 8px; height: 100%; }
-.tag-filter small { display: block; margin-top: 3px; color: var(--filter-sign); line-height: 1.3; }
+.tag-filter { display: grid; align-content: space-between; gap: 5px; }
+.tag-filter small { display: block; color: var(--muted); line-height: 1.3; }
+.tag-filter summary { cursor: pointer; background: var(--base-0); border: 1px solid var(--base-3); border-radius: var(--radius-sm); padding: 8px; min-height: 38px; }
+.tag-filter summary:hover, .tag-filter details[open] summary { border-color: var(--accent); }
+.tag-picker-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .tag-picker { position: absolute; inset: calc(100% + 4px) 0 auto auto; z-index: 12; width: min(280px, 80vw); padding: var(--s2); background: var(--base-1); border: 1px solid var(--base-3); border-radius: var(--radius); box-shadow: var(--shadow); }
 .tag-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; max-height: 212px; overflow-y: auto; margin: 8px 0; }
 .tag-options button { text-align: left; overflow-wrap: anywhere; }

@@ -68,22 +68,34 @@
                   <option value="document">Document</option><option value="other">Other</option>
                 </select>
               </label>
-              <details class="tag-filter include-filter" id="include-tags">
-                <summary><strong><span aria-hidden="true">＋</span> Include tags <span class="tag-selection-count"></span></strong><small>Must have <b>all</b> selected tags</small></summary>
-                <div class="tag-picker">
-                  <label class="filter-field">Find tags to include<input type="search" placeholder="Search tag names"></label>
-                  <div class="tag-options"></div>
-                  <button type="button" class="btn btn-ghost more-tags">Show more tags</button>
-                </div>
-              </details>
-              <details class="tag-filter exclude-filter" id="exclude-tags">
-                <summary><strong><span aria-hidden="true">−</span> Exclude tags <span class="tag-selection-count"></span></strong><small>Hide assets with <b>any</b> selected tag</small></summary>
-                <div class="tag-picker">
-                  <label class="filter-field">Find tags to exclude<input type="search" placeholder="Search tag names"></label>
-                  <div class="tag-options"></div>
-                  <button type="button" class="btn btn-ghost more-tags">Show more tags</button>
-                </div>
-              </details>
+              <div class="tag-filter include-filter">
+                <div class="tag-filter-label"><strong>Include tags</strong><small id="include-rule">Match all</small></div>
+                <details id="include-tags">
+                  <summary aria-label="Choose tags to include" aria-describedby="include-rule"><span class="tag-selection-count">＋ Choose tags</span></summary>
+                  <div class="tag-picker">
+                    <label class="filter-field">Find tags to include<input type="search" placeholder="Search tag names"></label>
+                    <div class="tag-options"></div>
+                    <div class="tag-picker-actions">
+                      <button type="button" class="btn btn-ghost more-tags">Show more tags</button>
+                      <button type="button" class="btn tag-done">Done</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <div class="tag-filter exclude-filter">
+                <div class="tag-filter-label"><strong>Exclude tags</strong><small id="exclude-rule">Hide if any match</small></div>
+                <details id="exclude-tags">
+                  <summary aria-label="Choose tags to exclude" aria-describedby="exclude-rule"><span class="tag-selection-count">− Choose tags</span></summary>
+                  <div class="tag-picker">
+                    <label class="filter-field">Find tags to exclude<input type="search" placeholder="Search tag names"></label>
+                    <div class="tag-options"></div>
+                    <div class="tag-picker-actions">
+                      <button type="button" class="btn btn-ghost more-tags">Show more tags</button>
+                      <button type="button" class="btn tag-done">Done</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
             </div>
             <div class="filter-active"><div id="active-filters" aria-label="Active filters"></div>
               <button id="filter-clear" class="btn btn-ghost hidden" type="button">Clear all</button>
