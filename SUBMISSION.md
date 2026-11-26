@@ -34,9 +34,9 @@ export KEEPSTACK_HOST=127.0.0.1 KEEPSTACK_PORT=8000 KEEPSTACK_BASE_URL=http://12
 
 ## 实测结果
 
-本地 pytest 41 通过、2 跳过（无 CLIP 模型，本机 Tesseract 缺动态库），Chromium 9 通过。验证了同时间戳翻页、旧响应晚到、CSV 中文和特殊字符往返及零结果表头、集合成员变化后列表与导出同步、上传中断后单文件重试。演示服务 `8011` 实测四个角色登录、筛选和退出。
+本地 pytest 41 通过、2 跳过（无 CLIP 模型，本机 Tesseract 缺动态库），Chromium 11 通过。覆盖同时间戳分页、请求乱序、CSV 转义与空表头、集合变更后列表与导出同步、上传中断后重试、Viewer 空库提示和详情失败恢复。演示服务 `8011` 实测四个角色登录、筛选和退出。
 
-集成代码提交 `573d2f8bcc911ada3f7c74f7b33b64b235da8584` 的 CI 通过。Python 3.10／3.12 各 42 通过、1 跳过（缺 CLIP 模型），Chromium 9 通过。[代码 CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45768429062) · [集成分支运行记录](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions?query=branch%3Acodex%2Fasset-search)
+集成代码提交 `86240f1a29832428832412fff03f29521981e4ef` 的 CI 通过。Python 3.10／3.12 各 42 通过、1 跳过（缺 CLIP 模型），Chromium 11 通过。[代码 CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45769804097) · [集成分支运行记录](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions?query=branch%3Acodex%2Fasset-search)
 
 [集合选择器](docs/screenshots/quiz-collection-picker.jpg) · [第二页与全量导出](docs/screenshots/quiz-library-export.jpg) · [集合描述和成员](docs/screenshots/quiz-collection-members.jpg) · [上传中断与 Retry](docs/screenshots/quiz-upload-retry.jpg)
 
@@ -59,5 +59,6 @@ KEEPSTACK_E2E_OUTPUT=test-results/browser .venv/bin/python -m pytest -q tests/e2
 
 - **上传。** 图片和其他素材共用默认 1024 MiB 的单文件上限，可用 `KEEPSTACK_MAX_UPLOAD_MB` 调整。拒绝空文件和损坏的光栅图。支持文档（如 CSV）、视频、音频等素材，预览能力因格式而异。按文件内容去重。中断后当前文件可 Retry，已成功文件保留，批次继续。无断点续传。
 - **数据规模。** 已测试导出 207 条。浏览器下载前会缓冲 CSV。数据不变时保证分页和导出一致，无跨请求快照或跨客户端实时同步。
-- **已知辅助场景。** 列表失败可 Retry，CSV 失败有提示，保存失败保留草稿。模拟详情元数据 500 时，抽屉停在 Loading。模拟分享、删除素材、Users 或 Dashboard 失败时，页面框架仍在，相关操作缺明确反馈。另有 viewer 空库提示引用隐藏的 Upload。已记入 [收尾清单](TODO.md)。
+- **失败恢复。** 列表或主详情失败可 Retry，CSV 失败有提示，保存失败保留草稿。嵌入元数据和 Similar assets 可以单独重试。
+- **已知辅助场景。** 模拟分享、删除素材、Users 或 Dashboard 失败时，页面框架仍在，相关操作缺明确反馈。已记入 [收尾清单](TODO.md)。
 - **题目范围外。** 语义搜索和模型优化、后台导出、新权限体系、在线部署、留存自动执行。保留既有 Similar assets，留存日期只存值。
