@@ -145,11 +145,18 @@ def select_tag(page, group, name):
     picker.get_by_role("button", name=name, exact=True).click()
 
 
+def select_collection(page, name):
+    picker = page.locator("#filter-collection")
+    picker.locator("summary").press("Enter")
+    picker.get_by_role("searchbox").fill(name)
+    picker.get_by_role("button", name=name, exact=True).click()
+
+
 def test_search_page_and_csv_keep_click_time_filters(page):
     login(page)
     locator = page.locator
     locator("#search").fill("harbor")
-    locator("#filter-collection").select_option(label="Harbor campaign")
+    select_collection(page, "Harbor campaign")
     locator("#filter-media").select_option("image")
     select_tag(page, "include", "approved")
     select_tag(page, "include", "campaign")
@@ -181,7 +188,7 @@ def test_library_reset_stale_response_and_retry(page):
     locator = page.locator
     search = locator("#search")
     search.fill("harbor")
-    locator("#filter-collection").select_option(label="Harbor campaign")
+    select_collection(page, "Harbor campaign")
     loc_grid = locator("#grid .card")
     expect(loc_grid).to_have_count(12)
     expect(locator("#page-prev")).to_be_disabled()
@@ -234,6 +241,10 @@ def test_collections_and_one_save_edit_round_trip(page):
     page.get_by_role("button", name="Create empty collection").click()
     card = locator(".collection-card", has_text="Browser review")
     expect(card).to_contain_text("0 assets")
+    locator("[data-view=library]").click()
+    select_collection(page, "Browser review")
+    expect(locator("#result-title")).to_have_text("Library (0)")
+    locator("[data-view=collections]").click()
     card.click()
     expect(locator("#collection-name")).to_have_text("Browser review")
     expect(locator("#export-csv")).to_be_hidden()
@@ -248,6 +259,12 @@ def test_collections_and_one_save_edit_round_trip(page):
     choices.first.check()
     locator("#collection-picker-add").click()
     expect(locator("#collection-count")).to_have_text("13 assets")
+    locator("[data-view=library]").click()
+    expect(locator("#filter-collection summary")).to_have_text("Browser review")
+    expect(locator("#result-title")).to_have_text("Library (13)")
+    assert len(export_rows(page, locator("#export-csv").click)) == 13
+    locator("[data-view=collections]").click()
+    card.click()
     locator("#collection-next").click()
     expect(locator("#collection-grid .card")).to_have_count(1)
     locator(f'#collection-grid [data-uuid="{uuid}"]').click()
@@ -279,13 +296,23 @@ def test_collections_and_one_save_edit_round_trip(page):
     locator("#drawer-close").click()
     expect(locator("#collection-count")).to_have_text("12 assets")
     expect(locator("#collection-grid .card")).to_have_count(12)
-    locator("#collection-back").click()
+    locator("[data-view=library]").click()
+    expect(locator("#result-title")).to_have_text("Library (12)")
+    assert uuid not in {row["uuid"] for row in export_rows(page, locator("#export-csv").click)}
+    locator("[data-view=collections]").click()
     page.once("dialog", lambda dialog: dialog.accept())
     page.get_by_role("button", name="Delete collection: Browser review").click()
     expect(card).to_have_count(0)
     locator("[data-view=library]").click()
+    expect(locator("#filter-collection summary")).to_have_text("All collections")
+    expect(locator("#active-filters [data-kind=collection]")).to_have_count(0)
+    picker = locator("#filter-collection")
+    picker.locator("summary").press("Enter")
+    picker.get_by_role("searchbox").fill("Browser review")
+    expect(picker.locator(".tag-options")).to_have_text("No collection names found.")
+    picker.get_by_role("searchbox").press("Escape")
     locator("#search").fill(title)
-    locator("#filter-collection").select_option(label="Harbor campaign")
+    select_collection(page, "Harbor campaign")
     expect(locator("#result-title")).to_have_text("Results (1)")
     row, = export_rows(page, locator("#export-csv").click)
     assert row["uuid"] == uuid and row["description"] == description
@@ -408,6 +435,55 @@ def test_upload_feedback_and_open_audit_refresh(page):
     locator("#upload-cancel").click()
     expect(locator("#audit-rows")).to_contain_text("created.csv")
     expect(locator("#audit-rows")).not_to_contain_text("renamed.csv")
+    locator("#btn-upload").click()
+    held = []
+    page.route("**/api/assets", lambda route: held.append(route), times=1)
+    with page.expect_request(lambda req: req.method == "POST" and req.url.endswith("/api/assets")):
+        locator("#file-input").set_input_files([
+            {"name": "interrupted.csv", "mimeType": "text/csv", "buffer": b"name,ok\ninterrupted,true"},
+            {"name": "next.csv", "mimeType": "text/csv", "buffer": b"name,ok\nnext,true"},
+        ])
+    expect(locator(".upload-status").first).to_have_text("Uploading…")
+    expect(locator(".upload-status").last).to_have_text("Queued")
+    held[0].abort("internetdisconnected")
+    expect(locator("#upload-summary")).to_have_text("1 uploaded · 0 already exists · 1 failed")
+    expect(locator(".upload-item.err")).to_contain_text("Failed")
+    page.get_by_role("button", name="Retry interrupted.csv").click()
+    expect(locator("#upload-summary")).to_have_text("2 uploaded · 0 already exists · 0 failed")
+    expect(locator("#upload-list")).not_to_contain_text("created.csv")
+
+
+def test_library_collection_picker_pages_and_clears_selection(page, base_url):
+    login(page)
+    token = page.evaluate("localStorage.getItem('keepstack_token')")
+    for number in range(10):
+        result = page.request.post(base_url + "/api/collections",
+                                   headers={"Authorization": "Bearer " + token},
+                                   data={"name": f"Picker review {number:02}"})
+        assert result.ok
+    page.locator("[data-view=library]").click()
+    page.set_viewport_size({"width": 360, "height": 800})
+    picker = page.locator("#filter-collection")
+    picker.locator("summary").press("Enter")
+    expect(picker.locator(".tag-page")).to_have_text("1 / 2")
+    popup = picker.locator(".tag-picker").bounding_box()
+    assert popup["x"] >= 0 and popup["x"] + popup["width"] <= 360
+    picker.get_by_role("button", name="Next", exact=True).click()
+    expect(picker.locator(".tag-page")).to_have_text("2 / 2")
+    picker.get_by_role("searchbox").fill("REVIEW 09")
+    expect(picker.locator(".tag-page")).to_have_text("1 / 1")
+    picker.get_by_role("button", name="Picker review 09", exact=True).click()
+    expect(picker.locator("summary")).to_have_text("Picker review 09")
+    expect(page.locator("#result-title")).to_have_text("Library (0)")
+    picker.locator("summary").press("Enter")
+    picker.get_by_role("searchbox").fill("Harbor")
+    picker.get_by_role("button", name="Harbor campaign", exact=True).click()
+    expect(page.locator("#active-filters [data-kind=collection]")).to_have_count(1)
+    page.get_by_role("button", name="Remove Collection: Harbor campaign").click()
+    expect(picker.locator("summary")).to_have_text("All collections")
+    select_collection(page, "Harbor campaign")
+    select_collection(page, "All collections")
+    expect(page.locator("#active-filters [data-kind=collection]")).to_have_count(0)
 
 
 def test_matching_asset_pickers_keep_draft_until_save(page, base_url):

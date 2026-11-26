@@ -102,9 +102,8 @@ function logout() {
   $("#collection-create-dialog").close();
   $("#collection-description-dialog").close();
   $("#collection-asset-picker").close();
-  $("#filter-collection").replaceChildren(new Option("All collections", ""));
   $("#filter-error").classList.add("hidden");
-  for (const picker of $$(".tag-filter details")) {
+  for (const [picker] of libraryPickers) {
     picker.open = false;
     picker.dataset.page = "0";
     $("input", picker).value = "";
@@ -167,12 +166,16 @@ function showView(view) {
 // ---------- library / search ----------
 let searchTimer;
 const tagPickers = { includeTags: $("#include-tags"), excludeTags: $("#exclude-tags") };
+const collectionPicker = $("#filter-collection");
+const libraryPickers = [
+  [collectionPicker, renderCollectionOptions],
+  ...Object.entries(tagPickers).map(([key, picker]) => [picker, () => renderTagOptions(key)]),
+];
 const tagPageSize = 8;
 $("#search").addEventListener("input", event => {
   state.q = event.target.value;
   updateFilters(250);
 });
-$("#filter-collection").addEventListener("change", event => { state.collection = event.target.value; updateFilters(); });
 $("#filter-media").addEventListener("change", event => { state.media = event.target.value; updateFilters(); });
 $("#sort").addEventListener("change", event => { state.sort = event.target.value; updateFilters(); });
 $("#filter-clear").addEventListener("click", () => {
@@ -247,8 +250,14 @@ function startLibraryLoading() {
 
 function syncFilters() {
   $("#search").value = state.q;
-  $("#filter-collection").value = state.collection;
   $("#filter-media").value = state.media;
+  const collection = collectionCatalog.find(item => String(item.id) === state.collection);
+  const collectionLabel = collection?.name || "All collections";
+  $(".tag-selection-count", collectionPicker).textContent = collectionLabel;
+  $("summary", collectionPicker).setAttribute("aria-label", "Choose collection: " + collectionLabel);
+  $$(".tag-options button", collectionPicker).forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.collectionId === state.collection));
+  });
   const chips = $("#active-filters");
   chips.replaceChildren();
   const chip = (key, label, remove) => {
@@ -262,10 +271,7 @@ function syncFilters() {
     chips.append(button);
   };
   if (state.q.trim()) chip("q", "Keyword: " + state.q.trim(), () => { state.q = ""; });
-  if (state.collection) {
-    const label = $("#filter-collection").selectedOptions[0]?.textContent;
-    if (label) chip("collection", "Collection: " + label, () => { state.collection = ""; });
-  }
+  if (collection) chip("collection", "Collection: " + collection.name, () => { state.collection = ""; });
   if (state.media) chip("media", "Type: " + state.media, () => { state.media = ""; });
   for (const [key, picker] of Object.entries(tagPickers)) {
     const sign = key === "includeTags" ? "＋" : "−";
@@ -280,6 +286,28 @@ function syncFilters() {
     });
   }
   $("#filter-clear").classList.toggle("hidden", !chips.childElementCount);
+}
+
+function renderCollectionOptions() {
+  const query = $("input", collectionPicker).value.trim().toLowerCase();
+  const options = [{ id: "", name: "All collections" }, ...collectionCatalog]
+    .filter(item => item.name.toLowerCase().includes(query));
+  renderPickerPage(collectionPicker, options, "No collection names found.", item => {
+    const id = String(item.id);
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.type = "button";
+    button.textContent = item.name;
+    button.dataset.collectionId = id;
+    button.setAttribute("aria-pressed", String(id === state.collection));
+    button.addEventListener("click", () => {
+      closeLibraryPicker(collectionPicker);
+      if (id === state.collection) return;
+      state.collection = id;
+      updateFilters();
+    });
+    return button;
+  });
 }
 
 function renderTagOptions(key) {
@@ -325,24 +353,28 @@ function bindPickerPages(picker, render) {
   }
 }
 
-for (const [key, picker] of Object.entries(tagPickers)) {
-  const closePicker = () => { picker.open = false; $("summary", picker).focus(); };
+function closeLibraryPicker(picker) {
+  picker.open = false;
+  $("summary", picker).focus();
+}
+
+for (const [picker, render] of libraryPickers) {
   $("summary", picker).addEventListener("click", () => {
     if (!picker.open) {
-      Object.values(tagPickers).filter(other => other !== picker).forEach(other => { other.open = false; });
+      for (const [other] of libraryPickers) if (other !== picker) other.open = false;
       $("input", picker).value = "";
       picker.dataset.page = "0";
-      renderTagOptions(key);
+      render();
     }
   });
-  bindPickerPages(picker, () => renderTagOptions(key));
-  $(".tag-done", picker).addEventListener("click", closePicker);
+  bindPickerPages(picker, render);
+  $(".tag-done", picker).addEventListener("click", () => closeLibraryPicker(picker));
   picker.addEventListener("keydown", event => {
-    if (event.key === "Escape") closePicker();
+    if (event.key === "Escape") closeLibraryPicker(picker);
   });
 }
 document.addEventListener("click", event => {
-  if (!event.target.closest(".tag-filter")) Object.values(tagPickers).forEach(picker => { picker.open = false; });
+  if (!event.target.closest(".tag-filter")) for (const [picker] of libraryPickers) picker.open = false;
 });
 
 async function loadFilterOptions() {
@@ -867,14 +899,13 @@ async function loadCollectionCatalog() {
     const data = await api("/api/collections", { cache: "no-store" });
     if (session !== sessionVersion || version !== collectionCatalogVersion) return true;
     collectionCatalog = data.collections;
-    $("#filter-collection").replaceChildren(new Option("All collections", ""),
-      ...collectionCatalog.map(item => new Option(item.name, item.id)));
     if (state.collection && !collectionCatalog.some(item => String(item.id) === state.collection)) {
       state.collection = "";
       if (!$("#view-library").classList.contains("hidden")) updateFilters();
       else offset = 0;
     }
     syncFilters();
+    if (collectionPicker.open) renderCollectionOptions();
     if (collectionViewId === null) renderCollectionList();
     else renderCollectionDescription();
     return true;
