@@ -374,6 +374,26 @@ def test_collection_description_is_optional_editable_and_above_assets(page):
     assert description.bounding_box()["y"] < image.bounding_box()["y"]
 
 
+def test_empty_library_message_matches_upload_permission(page):
+    page.route("**/api/assets?*", lambda route: route.fulfill(json={"items": [], "total": 0}))
+    empty = page.locator("#empty")
+    upload = page.locator("#btn-upload")
+
+    login(page)
+    expect(upload).to_be_visible()
+    expect(empty).to_have_text("No assets yet. Click Upload to get started.")
+    page.get_by_role("button", name="Sign out").click()
+
+    login(page, "viewer", "demo1234")
+    expect(upload).to_be_hidden()
+    expect(empty).to_be_visible()
+    expect(empty).to_have_text("No assets are available yet.")
+    page.locator("#search").fill("harbor")
+    expect(empty).to_have_text("No assets match these filters. Try removing a condition.")
+    page.locator("#filter-clear").click()
+    expect(empty).to_have_text("No assets are available yet.")
+
+
 def test_viewer_session_and_filter_directory_failure(page):
     login(page)
     locator = page.locator
