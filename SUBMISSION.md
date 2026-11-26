@@ -21,13 +21,15 @@ export KEEPSTACK_HOST=127.0.0.1 KEEPSTACK_PORT=8000 KEEPSTACK_BASE_URL=http://12
 
 搜索数据生成器包含同创建时间、不同集合和类型、已删除、标签前缀相同及只命中一个排除条件的样本。生成数据不提交。
 
-集合操作可重复验证：在 Collections 新建空集合，打开后批量添加现有素材；从任意素材详情用同一个 **Save changes** 保存元数据、标签和集合关系。删除集合或移出成员不会删除原素材。普通用户的操作权限取决于角色。
+集合操作可重复验证：在 Collections 新建空集合，可选填描述。打开后先看描述，再看图片；用 **Edit description** 修改或清空描述，用 **Add assets** 批量添加现有素材。从任意素材详情用同一个 **Save changes** 保存元数据、标签和集合关系。删除集合或移出成员不会删除原素材。
+
+要试其他角色，点右上角 **Sign out**，在同一登录表单覆盖默认用户名和密码。seed 生成 `curator`（editor）、`contributor` 和 `viewer` 三个演示用户，密码均为 `demo1234`。右上角显示登录后的角色。这些是本地演示默认值。[角色和操作对照](docs/asset-search-stories.md#us-01-登录退出和角色)
 
 ## 验证结果
 
-- **pytest：** `.venv/bin/python -m pytest -q`。本地 40 通过、2 跳过（无本地 CLIP 模型；本机 Tesseract 缺动态库，测试时用不含该二进制的 `PATH`）。测试自行创建临时数据库，无需手动 seed。
-- **Playwright Chromium：** 4 条自动回归走真实登录表单与浏览器下载，验证搜索和跨页 CSV（包括零结果表头、导出途中换条件）、集合与单次保存（包括最后一页移出、失败保留草稿、Unicode、引号和换行）、角色和会话、上传批次状态及 Audit 刷新。每例用独立数据目录。
-- **GitHub Actions：** 集成代码提交 `77bbb72ae9f54e3924d5fc3d6f01f6543db30b84` 的 [CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45754622275) 通过：Python 3.10、3.12 各 41 通过、1 跳过（无 CLIP 模型），Chromium 4 通过。浏览器失败时保存截图和 trace。[集成分支运行记录](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions?query=branch%3Acodex%2Fasset-search)也可核对文档提交后的 CI。
+- **pytest：** `.venv/bin/python -m pytest -q`。本地 41 通过、2 跳过（无本地 CLIP 模型；本机 Tesseract 缺动态库，测试时用不含该二进制的 `PATH`）。测试自行创建临时数据库，无需手动 seed。
+- **Playwright Chromium：** 本地 8 条通过。覆盖真实表单、角色与会话、筛选与排序、列表请求乱序及重试、跨页 CSV 和下载失败、集合描述、组合编辑和选择器草稿、上传批次与审计。每例用独立数据目录。在 `8011` 另实测四种角色登录、退出及操作入口。
+- **GitHub Actions：** 集成代码提交 `3c6da1ec5f9f000f3a25d319a61001a4f6746ce5` 的 CI 通过。Python 3.10、3.12 各 42 通过、1 跳过（无 CLIP 模型），Chromium 8 通过。浏览器失败时保存截图和 trace。[已验证的 CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45766432174) · [集成分支运行记录](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions?query=branch%3Acodex%2Fasset-search)
 
 本地复跑浏览器回归（不依赖上面的本地演示服务）：
 
@@ -44,3 +46,4 @@ KEEPSTACK_E2E_OUTPUT=test-results/browser .venv/bin/python -m pytest -q tests/e2
 - CSV 用 UTF-8 BOM 和标准 CSV 引号转义；`tags` 是按名称排序的 JSON 数组，空标签为 `[]`。字段原样保留；使用电子表格打开不可信元数据时请按文本导入。
 - 服务端逐行发送 CSV，浏览器通过认证请求收到 Blob 后下载。集成测试验证 207 条可全量导出；未做后台导出或超大文件专项优化。
 - 上传每文件上限由 `KEEPSTACK_MAX_UPLOAD_MB` 控制（默认 1024 MiB）。这是应用接收 multipart 后的校验，不代替生产代理的请求体和并发限制。留存日期只存值、不执行自动删除或阻止删除；未引入新权限体系。
+- 已复现两处辅助场景的 UI 问题。viewer 的全库空态提示点击隐藏的 Upload；素材详情的元数据请求失败时停在 Loading。详见 [边界验收](docs/asset-search-stories.md)。
