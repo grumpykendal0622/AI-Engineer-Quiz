@@ -5,6 +5,8 @@ const initialFilters = { q: "", media: "", includeTags: [], excludeTags: [], sor
 const state = { token: localStorage.getItem("keepstack_token"), user: null, ...initialFilters };
 let sessionVersion = 0;
 let tagCatalog = [];
+let recentTags = [];
+let filterOptionsVersion = 0;
 let fromCollections = false;
 const pageSize = 12;
 let offset = 0, matchTotal = 0, libraryVersion = 0, libraryReady = false;
@@ -77,11 +79,13 @@ function logout() {
   $("#search").value = "";
   $("#sort").value = "newest";
   tagCatalog = [];
+  recentTags = [];
   fromCollections = false;
   $("#filter-collection").replaceChildren(new Option("All collections", ""));
   $("#filter-error").classList.add("hidden");
   for (const picker of $$(".tag-filter details")) {
     picker.open = false;
+    picker.dataset.page = "0";
     $("input", picker).value = "";
     $(".tag-options", picker).replaceChildren();
   }
@@ -130,6 +134,7 @@ function showView(view) {
 // ---------- library / search ----------
 let searchTimer;
 const tagPickers = { includeTags: $("#include-tags"), excludeTags: $("#exclude-tags") };
+const tagPageSize = 8;
 $("#search").addEventListener("input", event => {
   state.q = event.target.value;
   updateFilters(250);
@@ -232,8 +237,8 @@ function syncFilters() {
   if (state.media) chip("media", "Type: " + state.media, () => { state.media = ""; });
   for (const [key, picker] of Object.entries(tagPickers)) {
     const sign = key === "includeTags" ? "＋" : "−";
-    $(".tag-selection-count", picker).textContent = state[key].length
-      ? state[key].length + " selected · Edit" : sign + " Choose tags";
+    $(".tag-selection-count", picker).textContent = sign + (state[key].length
+      ? " " + state[key].length + " selected · Edit" : " Choose tags");
     for (const name of state[key]) {
       const prefix = key === "includeTags" ? "Include: " : "Exclude: ";
       chip(key, prefix + name, () => { state[key] = state[key].filter(tag => tag !== name); });
@@ -248,11 +253,13 @@ function syncFilters() {
 function renderTagOptions(key) {
   const picker = tagPickers[key];
   const query = $("input", picker).value.trim().toLowerCase();
-  const names = tagCatalog.filter(name => name.toLowerCase().includes(query));
+  const names = [...new Set([...recentTags, ...tagCatalog])].filter(name => name.toLowerCase().includes(query));
   const list = $(".tag-options", picker);
-  const limit = Number(picker.dataset.limit || 8);
+  const pageCount = Math.max(1, Math.ceil(names.length / tagPageSize));
+  const page = Math.min(Number(picker.dataset.page || 0), pageCount - 1);
+  picker.dataset.page = String(page);
   list.replaceChildren();
-  for (const name of names.slice(0, limit)) {
+  for (const name of names.slice(page * tagPageSize, (page + 1) * tagPageSize)) {
     const button = document.createElement("button");
     button.className = "btn";
     button.type = "button";
@@ -268,7 +275,9 @@ function renderTagOptions(key) {
     list.append(button);
   }
   if (!names.length) list.textContent = query ? "No tag names found." : "No tags available.";
-  $(".more-tags", picker).classList.toggle("hidden", names.length <= limit);
+  $(".tag-prev", picker).disabled = page === 0;
+  $(".tag-next", picker).disabled = page + 1 === pageCount;
+  $(".tag-page", picker).textContent = names.length ? `${page + 1} / ${pageCount}` : "0 tags";
 }
 
 for (const [key, picker] of Object.entries(tagPickers)) {
@@ -276,14 +285,18 @@ for (const [key, picker] of Object.entries(tagPickers)) {
   $("summary", picker).addEventListener("click", () => {
     if (!picker.open) {
       Object.values(tagPickers).filter(other => other !== picker).forEach(other => { other.open = false; });
+      $("input", picker).value = "";
+      picker.dataset.page = "0";
       renderTagOptions(key);
     }
   });
-  $("input", picker).addEventListener("input", () => { picker.dataset.limit = "8"; renderTagOptions(key); });
-  $(".more-tags", picker).addEventListener("click", () => {
-    picker.dataset.limit = String(Number(picker.dataset.limit || 8) + 8);
-    renderTagOptions(key);
-  });
+  $("input", picker).addEventListener("input", () => { picker.dataset.page = "0"; renderTagOptions(key); });
+  for (const [selector, step] of [[".tag-prev", -1], [".tag-next", 1]]) {
+    $(selector, picker).addEventListener("click", () => {
+      picker.dataset.page = String(Number(picker.dataset.page) + step);
+      renderTagOptions(key);
+    });
+  }
   $(".tag-done", picker).addEventListener("click", closePicker);
   picker.addEventListener("keydown", event => {
     if (event.key === "Escape") closePicker();
@@ -295,9 +308,10 @@ document.addEventListener("click", event => {
 
 async function loadFilterOptions() {
   const session = sessionVersion;
+  const version = ++filterOptionsVersion;
   try {
-    const [collections, tags] = await Promise.all([api("/api/collections"), api("/api/tags")]);
-    if (session !== sessionVersion) return;
+    const [collections, tags] = await Promise.all([api("/api/collections"), api("/api/tags", { cache: "no-store" })]);
+    if (session !== sessionVersion || version !== filterOptionsVersion) return;
     $("#filter-collection").replaceChildren(new Option("All collections", ""),
       ...collections.collections.map(item => new Option(item.name, item.id)));
     tagCatalog = tags.tags.map(tag => tag.name);
@@ -305,7 +319,7 @@ async function loadFilterOptions() {
     $("#filter-error").classList.add("hidden");
     syncFilters();
   } catch {
-    if (session !== sessionVersion) return;
+    if (session !== sessionVersion || version !== filterOptionsVersion) return;
     $("#filter-error").textContent = "Could not load filter options. Reopen Library to retry.";
     $("#filter-error").classList.remove("hidden");
   }
@@ -495,7 +509,7 @@ function renderDetailTags(tags, removeTag) {
   if (!tags.length) row.textContent = "No tags";
   for (const tag of tags) {
     const chip = document.createElement("span");
-    chip.className = tag.source === "ai" ? "tag ai" : "tag";
+    chip.className = "tag";
     chip.textContent = tag.name;
     if (removeTag) {
       const remove = document.createElement("button");
@@ -569,6 +583,11 @@ function bindAssetEditor(uuid, tags) {
       if (!form.isConnected) return;
       savedFields = values;
       tags = savedTags = updated.tags;
+      if (changedTags) {
+        const added = names().filter(name => !savedNames.includes(name));
+        recentTags = [...new Set([...added, ...recentTags])].slice(0, tagPageSize);
+        Object.keys(tagPickers).forEach(renderTagOptions);
+      }
       savedNames = names();
       message.textContent = "Saved";
       $(".detail-title").textContent = updated.asset.title;
