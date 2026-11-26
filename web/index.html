@@ -52,7 +52,6 @@
 
       <main class="content">
         <div id="view-library" class="view">
-          <button id="back-to-collections" class="btn btn-ghost hidden" type="button">← Back to collections</button>
           <section class="library-filters" aria-label="Library filters">
             <label class="filter-field">Keyword search
               <input id="search" type="search" placeholder="Search titles, filenames, tags, or metadata">
@@ -133,11 +132,31 @@
         </div>
 
         <div id="view-collections" class="view hidden">
-          <div class="view-head">
-            <h2>Collections</h2>
-            <button id="btn-new-collection" class="btn">New collection</button>
-          </div>
-          <div id="collection-list" class="collection-list"></div>
+          <section id="collection-overview">
+            <div class="view-head">
+              <h2>Collections</h2>
+              <button id="btn-new-collection" class="btn btn-primary hidden" type="button">+ New collection</button>
+            </div>
+            <div id="collection-list" class="collection-list"></div>
+          </section>
+          <section id="collection-members" class="hidden">
+            <div class="view-head collection-header">
+              <div class="collection-breadcrumb" aria-label="Collection path">
+                <button id="collection-back" class="btn btn-ghost" type="button">Collections</button>
+                <span aria-hidden="true">/</span>
+                <h2 id="collection-name"></h2>
+              </div>
+              <button id="collection-add-assets" class="btn btn-primary hidden" type="button">+ Add assets</button>
+            </div>
+            <p id="collection-count" class="muted" aria-live="polite"></p>
+            <div id="collection-grid" class="grid"></div>
+            <div id="collection-status" class="empty hidden" role="status"></div>
+            <div class="library-pages hidden" id="collection-pages">
+              <button type="button" id="collection-prev" class="btn" disabled>← Previous</button>
+              <span id="collection-page-summary" aria-live="polite"></span>
+              <button type="button" id="collection-next" class="btn" disabled>Next →</button>
+            </div>
+          </section>
         </div>
 
         <div id="view-dashboard" class="view hidden">
@@ -193,6 +212,32 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
+  <dialog id="collection-create-dialog" class="collection-dialog" aria-labelledby="collection-create-title">
+    <form id="collection-create-form">
+      <h3 id="collection-create-title">New collection</h3>
+      <label class="filter-field">Collection name<input id="collection-new-name" required maxlength="80"></label>
+      <p id="collection-create-error" class="error" role="alert"></p>
+      <div class="btn-row">
+        <button type="button" class="btn" id="collection-create-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary">Create empty collection</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="collection-asset-picker" class="collection-dialog asset-picker" aria-labelledby="collection-picker-title">
+    <h3 id="collection-picker-title">Add assets</h3>
+    <p class="muted">Select existing Library assets. No files are copied.</p>
+    <div id="collection-picker-grid" class="picker-grid"></div>
+    <p id="collection-picker-status" role="status"></p>
+    <div class="library-pages">
+      <button id="collection-picker-prev" class="btn" type="button" disabled>← Previous</button>
+      <span id="collection-picker-page" aria-live="polite"></span>
+      <button id="collection-picker-next" class="btn" type="button" disabled>Next →</button>
+    </div>
+    <div class="btn-row">
+      <button id="collection-picker-cancel" class="btn" type="button">Cancel</button>
+      <button id="collection-picker-add" class="btn btn-primary" type="button" disabled>Add selected assets</button>
+    </div>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>
