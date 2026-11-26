@@ -414,6 +414,12 @@ def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
     asset = assets["Harbor view 05"]["uuid"]
     edit_path = f"/api/assets/{asset}"
     collection_path = f"/api/collections/{collection}"
+    anonymous = {"Authorization": ""}
+    assert library_client.get("/api/collections", headers=anonymous).status_code == 401
+    assert library_client.post("/api/collections", json={"name": "Not authorized"}, headers=anonymous).status_code == 401
+    assert library_client.get(collection_path + "/candidates", headers=anonymous).status_code == 401
+    assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=anonymous).status_code == 401
+    assert library_client.delete(collection_path, headers=anonymous).status_code == 401
     for role in ("viewer", "contributor", "editor"):
         name = "test_collections_" + role
         password = "test-only-password"
