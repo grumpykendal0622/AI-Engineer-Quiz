@@ -434,6 +434,8 @@ def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
         assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=headers).status_code == expected_edit
         assert library_client.post(collection_path + "/assets", json={"uuids": [asset]}, headers=headers).status_code == expected_edit
         assert library_client.delete("/api/collections/999999", headers=headers).status_code == (404 if role == "editor" else 403)
+        assert library_client.patch(edit_path, json={"status": "active"}, headers=headers).status_code == (200 if role == "editor" else 403)
+        assert library_client.delete("/api/assets/not-found", headers=headers).status_code == (404 if role == "editor" else 403)
 
 
 def test_upload_limits_and_mixed_batch(library_client, monkeypatch):

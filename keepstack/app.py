@@ -285,6 +285,8 @@ def asset_detail(uuid: str, user: dict = Depends(require_user)):
 @app.patch("/api/assets/{uuid}")
 def update_asset(uuid: str, request: Request, body: dict = Body(...),
                  user: dict = Depends(require_role("contributor"))):
+    if "status" in body and not role_at_least(user["role"], "editor"):
+        raise HTTPException(403, "Requires editor role to change asset status")
     a = _get_asset_or_404(uuid)
     retention = body.get("retention_until")
     if retention not in (None, ""):
