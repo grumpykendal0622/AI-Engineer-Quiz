@@ -80,7 +80,7 @@ function logout() {
   fromCollections = false;
   $("#filter-collection").replaceChildren(new Option("All collections", ""));
   $("#filter-error").classList.add("hidden");
-  for (const picker of $$(".tag-filter")) {
+  for (const picker of $$(".tag-filter details")) {
     picker.open = false;
     $("input", picker).value = "";
     $(".tag-options", picker).replaceChildren();
@@ -231,7 +231,9 @@ function syncFilters() {
   }
   if (state.media) chip("media", "Type: " + state.media, () => { state.media = ""; });
   for (const [key, picker] of Object.entries(tagPickers)) {
-    $(".tag-selection-count", picker).textContent = state[key].length ? "(" + state[key].length + ")" : "";
+    const sign = key === "includeTags" ? "＋" : "−";
+    $(".tag-selection-count", picker).textContent = state[key].length
+      ? state[key].length + " selected · Edit" : sign + " Choose tags";
     for (const name of state[key]) {
       const prefix = key === "includeTags" ? "Include: " : "Exclude: ";
       chip(key, prefix + name, () => { state[key] = state[key].filter(tag => tag !== name); });
@@ -270,6 +272,7 @@ function renderTagOptions(key) {
 }
 
 for (const [key, picker] of Object.entries(tagPickers)) {
+  const closePicker = () => { picker.open = false; $("summary", picker).focus(); };
   $("summary", picker).addEventListener("click", () => {
     if (!picker.open) {
       Object.values(tagPickers).filter(other => other !== picker).forEach(other => { other.open = false; });
@@ -281,8 +284,9 @@ for (const [key, picker] of Object.entries(tagPickers)) {
     picker.dataset.limit = String(Number(picker.dataset.limit || 8) + 8);
     renderTagOptions(key);
   });
+  $(".tag-done", picker).addEventListener("click", closePicker);
   picker.addEventListener("keydown", event => {
-    if (event.key === "Escape") { picker.open = false; $("summary", picker).focus(); }
+    if (event.key === "Escape") closePicker();
   });
 }
 document.addEventListener("click", event => {
