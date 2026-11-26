@@ -170,6 +170,59 @@ def test_search_page_and_csv_keep_click_time_filters(page):
     expect(locator("#result-title")).to_have_text("Results (0)")
     assert [row["uuid"] for row in export_rows(page, held[0].continue_)] == first + last
     assert export_rows(page, locator("#export-csv").click) == []
+    page.route("**/api/assets/export.csv?*", lambda route: route.fulfill(status=500), times=1)
+    locator("#export-csv").click()
+    expect(locator("#toast")).to_have_text("CSV export failed. Try again.")
+    expect(locator("#export-csv")).to_be_enabled()
+
+
+def test_library_reset_stale_response_and_retry(page):
+    login(page)
+    locator = page.locator
+    search = locator("#search")
+    search.fill("harbor")
+    locator("#filter-collection").select_option(label="Harbor campaign")
+    loc_grid = locator("#grid .card")
+    expect(loc_grid).to_have_count(12)
+    expect(locator("#page-prev")).to_be_disabled()
+    first_page = loc_grid.first.get_attribute("data-uuid")
+    locator("#page-next").click()
+    expect(locator("#page-summary")).to_contain_text("13–")
+    expect(locator("#page-next")).to_be_disabled()
+    oldest = loc_grid.last.get_attribute("data-uuid")
+    locator("#page-prev").click()
+    expect(loc_grid.first).to_have_attribute("data-uuid", first_page)
+    locator("#page-next").click()
+    expect(loc_grid.last).to_have_attribute("data-uuid", oldest)
+    locator("#sort").select_option("oldest")
+    expect(locator("#page-summary")).to_contain_text("1–12")
+    expect(loc_grid.first).to_have_attribute("data-uuid", oldest)
+    locator("#page-next").click()
+    expect(locator("#page-summary")).to_contain_text("13–")
+
+    held = []
+    pattern = "**/api/assets?*"
+    page.route("**/api/assets?q=harbor+view&*", lambda route: held.append(route), times=1)
+    with page.expect_request(lambda request: "/api/assets?q=harbor+view&" in request.url) as first_search:
+        search.fill("harbor view")
+    assert first_search.value.url.endswith("&offset=0")
+    search.fill("no such asset")
+    expect(locator("#result-title")).to_have_text("Results (0)")
+    stale = held[0].fetch()
+    assert stale.ok and stale.json()["total"] > 0
+    with page.expect_response(lambda response: "/api/assets?q=harbor+view&" in response.url):
+        held[0].fulfill(response=stale)
+    page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    expect(locator("#result-title")).to_have_text("Results (0)")
+
+    page.route(pattern, lambda route: route.fulfill(status=500), times=1)
+    search.fill("harbor")
+    expect(locator("#library-error")).to_be_visible()
+    expect(loc_grid).to_have_count(0)
+    expect(locator("#export-csv")).to_be_disabled()
+    locator("#library-retry").click()
+    expect(loc_grid).to_have_count(12)
+    expect(locator("#library-error")).to_be_hidden()
 
 
 def test_collections_and_one_save_edit_round_trip(page):
