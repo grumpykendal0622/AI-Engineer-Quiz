@@ -503,6 +503,14 @@ def list_collections(user: dict = Depends(require_user)):
     return {"collections": [dict(r) for r in rows]}
 
 
+def _collection_description(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(422, "Collection description must be text or null")
+    return value.strip() or None
+
+
 @app.post("/api/collections")
 def create_collection(request: Request, body: dict = Body(...),
                       user: dict = Depends(require_role("contributor"))):
@@ -511,17 +519,32 @@ def create_collection(request: Request, body: dict = Body(...),
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
         raise HTTPException(422, "Enter a collection name of 1–80 characters")
     name = name.strip()
+    description = _collection_description(body.get("description"))
     cid = str(uuidlib.uuid4())
     with transaction() as conn:
         cur = conn.execute(
             "INSERT INTO collections (uuid, name, description, parent_id, kind, created_by, created_at) "
             "SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM collections WHERE name = ? COLLATE NOCASE)",
-            (cid, name, body.get("description"), body.get("parent_id"),
+            (cid, name, description, body.get("parent_id"),
              body.get("kind", "folder"), user["id"], now_iso(), name))
         if not cur.rowcount:
             raise HTTPException(409, "A collection with this name already exists")
     log("collection.create", user=user, target_type="collection", target_id=cid, detail=name)
-    return {"id": cur.lastrowid, "uuid": cid, "name": name}
+    return {"id": cur.lastrowid, "uuid": cid, "name": name, "description": description}
+
+
+@app.patch("/api/collections/{cid}")
+def update_collection_description(cid: int, request: Request, body: dict = Body(...),
+                                  user: dict = Depends(require_role("contributor"))):
+    if "description" not in body:
+        raise HTTPException(422, "Provide a collection description, or null to clear it")
+    description = _collection_description(body["description"])
+    with transaction() as conn:
+        if not conn.execute("UPDATE collections SET description = ? WHERE id = ?", (description, cid)).rowcount:
+            raise HTTPException(404, "Collection not found")
+        log("collection.update", user=user, target_type="collection", target_id=cid,
+            detail="description", ip=client_ip(request), conn=conn)
+    return {"id": cid, "description": description}
 
 
 @app.delete("/api/collections/{cid}")

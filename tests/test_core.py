@@ -376,6 +376,36 @@ def test_collection_bulk_add_and_delete_keep_originals(library_client, harbor_de
         library_client.delete(endpoint)
 
 
+def test_collection_description_create_update_and_clear(library_client):
+    assert library_client.post("/api/collections", json={"name": "Invalid description", "description": 123}).status_code == 422
+    original = '港口照片, "精选"\n第二行'
+    created = library_client.post("/api/collections", json={"name": "Description test", "description": original})
+    assert created.status_code == 200
+    assert created.json()["description"] == original
+    cid = created.json()["id"]
+    path = f"/api/collections/{cid}"
+
+    def collection():
+        return next(item for item in library_client.get("/api/collections").json()["collections"] if item["id"] == cid)
+
+    try:
+        assert collection()["description"] == original
+        for invalid in ({}, {"description": [original]}):
+            assert library_client.patch(path, json=invalid).status_code == 422
+        assert collection()["description"] == original
+        assert library_client.patch(path, json={"description": "  Edited  "}).json()["description"] == "Edited"
+        edited = collection()
+        assert edited["name"] == "Description test"
+        assert edited["description"] == "Edited"
+        assert edited["asset_count"] == 0
+        for empty in (" \n ", None):
+            assert library_client.patch(path, json={"description": empty}).json()["description"] is None
+            assert collection()["description"] is None
+    finally:
+        library_client.delete(path)
+    assert library_client.patch(path, json={"description": None}).status_code == 404
+
+
 def test_asset_edit_saves_membership_with_tags_and_metadata(library_client, harbor_demo):
     original_collection, assets = harbor_demo
     asset = assets["Harbor view 04"]
@@ -418,6 +448,7 @@ def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
     assert library_client.get("/api/collections", headers=anonymous).status_code == 401
     assert library_client.post("/api/collections", json={"name": "Not authorized"}, headers=anonymous).status_code == 401
     assert library_client.get(collection_path + "/candidates", headers=anonymous).status_code == 401
+    assert library_client.patch(collection_path, json={"description": None}, headers=anonymous).status_code == 401
     assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=anonymous).status_code == 401
     assert library_client.delete(collection_path, headers=anonymous).status_code == 401
     for role in ("viewer", "contributor", "editor"):
@@ -431,6 +462,7 @@ def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
         assert library_client.get("/api/collections", headers=headers).status_code == 200
         expected_edit = 403 if role == "viewer" else 200
         assert library_client.get(collection_path + "/candidates", headers=headers).status_code == expected_edit
+        assert library_client.patch("/api/collections/999999", json={"description": None}, headers=headers).status_code == (403 if role == "viewer" else 404)
         assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=headers).status_code == expected_edit
         assert library_client.post(collection_path + "/assets", json={"uuids": [asset]}, headers=headers).status_code == expected_edit
         assert library_client.delete("/api/collections/999999", headers=headers).status_code == (404 if role == "editor" else 403)

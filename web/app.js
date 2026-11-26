@@ -100,6 +100,7 @@ function logout() {
   collectionViewId = null;
   collectionOffset = collectionTotal = 0;
   $("#collection-create-dialog").close();
+  $("#collection-description-dialog").close();
   $("#collection-asset-picker").close();
   $("#filter-collection").replaceChildren(new Option("All collections", ""));
   $("#filter-error").classList.add("hidden");
@@ -875,6 +876,7 @@ async function loadCollectionCatalog() {
     }
     syncFilters();
     if (collectionViewId === null) renderCollectionList();
+    else renderCollectionDescription();
     return true;
   } catch {
     if (session !== sessionVersion || version !== collectionCatalogVersion) return true;
@@ -907,6 +909,7 @@ function renderCollectionList() {
     $("#collection-overview").classList.add("hidden");
     $("#collection-members").classList.remove("hidden");
     $("#collection-name").textContent = item.name;
+    renderCollectionDescription();
     loadCollectionAssets();
   }));
   $$(".collection-delete").forEach(button => button.addEventListener("click", async () => {
@@ -943,6 +946,19 @@ function showCollectionList() {
   loadCollectionCatalog();
 }
 $("#collection-back").addEventListener("click", showCollectionList);
+
+function renderCollectionDescription() {
+  const item = collectionCatalog.find(collection => collection.id === collectionViewId);
+  const description = item?.description?.trim() || "";
+  const editable = Boolean(item) && canEditAssets();
+  const text = $("#collection-description");
+  const edit = $("#collection-edit-description");
+  text.textContent = description;
+  text.classList.toggle("hidden", !description);
+  edit.classList.toggle("hidden", !editable);
+  edit.textContent = description ? "Edit description" : "Add description";
+  $("#collection-description-row").classList.toggle("hidden", !description && !editable);
+}
 
 function syncCollectionPages(ready) {
   $("#collection-prev").disabled = !ready || collectionOffset === 0;
@@ -996,9 +1012,11 @@ function refreshAssetViews({ tags = false, collections = false } = {}) {
 
 const createCollectionDialog = $("#collection-create-dialog");
 const createCollectionName = $("#collection-new-name");
+const createCollectionDescription = $("#collection-new-description");
 const createCollectionError = $("#collection-create-error");
 $("#btn-new-collection").addEventListener("click", () => {
   createCollectionName.value = "";
+  createCollectionDescription.value = "";
   createCollectionError.textContent = "";
   createCollectionDialog.showModal();
   createCollectionName.focus();
@@ -1012,12 +1030,11 @@ $("#collection-create-form").addEventListener("submit", async event => {
   const name = createCollectionName.value.trim();
   if (!name) { createCollectionError.textContent = "Enter a collection name."; return; }
   const session = sessionVersion;
-  const buttons = $$("button", createCollectionDialog);
-  buttons.forEach(button => { button.disabled = true; });
-  createCollectionName.disabled = true;
+  const controls = $$("button, input, textarea", createCollectionDialog);
+  controls.forEach(control => { control.disabled = true; });
   createCollectionError.textContent = "";
   try {
-    await api("/api/collections", { json: { name } });
+    await api("/api/collections", { json: { name, description: createCollectionDescription.value } });
     if (session !== sessionVersion) return;
     createCollectionDialog.close();
     loadCollectionCatalog();
@@ -1026,8 +1043,47 @@ $("#collection-create-form").addEventListener("submit", async event => {
     if (session === sessionVersion) createCollectionError.textContent =
       error.message.includes("already exists") ? "A collection with this name already exists." : "Could not create collection. Try again.";
   } finally {
-    buttons.forEach(button => { button.disabled = false; });
-    createCollectionName.disabled = false;
+    controls.forEach(control => { control.disabled = false; });
+  }
+});
+
+const editCollectionDialog = $("#collection-description-dialog");
+const editCollectionInput = $("#collection-description-input");
+const editCollectionError = $("#collection-description-error");
+$("#collection-edit-description").addEventListener("click", () => {
+  const item = collectionCatalog.find(collection => collection.id === collectionViewId);
+  if (!item || !canEditAssets()) return;
+  editCollectionInput.value = item.description ?? "";
+  editCollectionError.textContent = "";
+  editCollectionDialog.showModal();
+  editCollectionInput.focus();
+});
+$("#collection-description-cancel").addEventListener("click", () => editCollectionDialog.close());
+editCollectionDialog.addEventListener("cancel", event => {
+  if ($("button[type=submit]", editCollectionDialog).disabled) event.preventDefault();
+});
+$("#collection-description-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const session = sessionVersion, id = collectionViewId;
+  const controls = $$("button, textarea", editCollectionDialog);
+  controls.forEach(control => { control.disabled = true; });
+  editCollectionError.textContent = "";
+  try {
+    const { description } = await api(`/api/collections/${id}`, {
+      method: "PATCH", json: { description: editCollectionInput.value },
+    });
+    if (session !== sessionVersion) return;
+    const item = collectionCatalog.find(collection => collection.id === id);
+    if (item) item.description = description;
+    renderCollectionDescription();
+    editCollectionDialog.close();
+    loadCollectionCatalog();
+    toast("Collection description saved");
+  } catch (error) {
+    if (session === sessionVersion) editCollectionError.textContent = error.status === 404
+      ? "This collection no longer exists." : "Could not save description. Your changes are still here.";
+  } finally {
+    controls.forEach(control => { control.disabled = false; });
   }
 });
 
