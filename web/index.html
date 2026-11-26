@@ -197,14 +197,13 @@
   <!-- Upload modal -->
   <div id="upload-modal" class="modal hidden">
     <div class="modal-backdrop"></div>
-    <div class="modal-card">
-      <h3>Upload assets</h3>
-      <div id="dropzone" class="dropzone">
-        <p>Drag files here or click to browse</p>
-        <input id="file-input" type="file" multiple hidden>
-      </div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+      <h3 id="upload-title">Upload assets</h3>
+      <button id="dropzone" class="dropzone" type="button">Drop files here or browse files</button>
+      <input id="file-input" type="file" multiple hidden>
       <label class="check"><input type="checkbox" id="ai-toggle" checked> Run AI enrichment (tags, alt-text)</label>
       <div id="upload-list" class="upload-list"></div>
+      <p id="upload-summary" class="muted" role="status"></p>
       <div class="modal-actions">
         <button id="upload-cancel" class="btn btn-ghost">Close</button>
       </div>

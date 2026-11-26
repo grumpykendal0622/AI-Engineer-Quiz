@@ -231,6 +231,12 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .upload-item { display: flex; justify-content: space-between; padding: var(--s1) var(--s2); background: var(--base-2); border-radius: var(--radius-sm); font-size: 13px; }
 .upload-item.ok { border-left: 3px solid var(--ok); }
 .upload-item.dup { border-left: 3px solid var(--muted); }
+.upload-item.err { border-left: 3px solid var(--danger); }
+.upload-item { gap: 8px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
+.upload-item > :first-child { flex-basis: 42%; }
+.upload-item .upload-status { flex: 1; min-width: 105px; }
+#upload-summary:empty { display: none; }
+#dropzone:disabled { opacity: .55; cursor: default; }
 .modal-actions { display: flex; justify-content: flex-end; gap: var(--s2); }
 
 /* ---------- tables / cards ---------- */

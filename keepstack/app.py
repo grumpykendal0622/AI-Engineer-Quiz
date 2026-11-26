@@ -18,8 +18,9 @@ from fastapi import (Body, Depends, FastAPI, File, Form, HTTPException, Query,
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 
-from . import __version__, ingest, search, standards, storage, thumbnails
+from . import __version__, ingest, metadata, search, standards, storage, thumbnails
 from .audit import log, now_iso
 from .auth import (authenticate, hash_password, login_locked, make_token,
                    note_login_failure, note_login_success, role_at_least,
@@ -154,24 +155,57 @@ def _user_public(u: dict) -> dict:
 # Assets
 # ---------------------------------------------------------------------------
 @app.post("/api/assets")
-async def upload_assets(
+def upload_assets(
     request: Request,
     files: list[UploadFile] = File(...),
     run_ai: bool = Form(True),
     user: dict = Depends(require_role("contributor")),
 ):
-    results = []
+    results, failed = [], []
     for f in files:
-        data = await f.read()
-        asset = ingest.ingest_stream(io.BytesIO(data), f.filename or "upload.bin",
-                                     user=user, run_ai=run_ai)
+        filename = f.filename or "upload.bin"
+        try:
+            validate_upload(f, filename)
+        except HTTPException as error:
+            if len(files) == 1:
+                raise
+            failed.append({"filename": filename, "status": error.status_code, "detail": error.detail})
+            continue
+        asset = ingest.ingest_stream(f.file, filename, user=user, run_ai=run_ai)
         if not asset.get("duplicate"):
             log("asset.create", user=user, target_type="asset", target_id=asset["uuid"],
                 detail=asset["filename"], ip=client_ip(request))
         results.append({"uuid": asset["uuid"], "title": asset["title"],
                         "duplicate": asset.get("duplicate", False),
                         "media_type": asset["media_type"]})
-    return {"created": results}
+    return {"created": results, "failed": failed}
+
+
+def validate_upload(file: UploadFile, filename: str) -> None:
+    source = file.file
+    size = file.size if file.size is not None else source.seek(0, 2)
+    source.seek(0)
+    if not size:
+        raise HTTPException(422, "File is empty")
+    if size > config.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"File exceeds the {config.max_upload_mb} MiB limit")
+
+    ext = Path(filename).suffix.lower().lstrip(".")
+    mime = metadata.guess_mime(filename)
+    if metadata.media_type_for(ext, mime) != "image" and not (file.content_type or "").startswith("image/"):
+        return
+    if mime == "image/svg+xml":
+        return
+    try:
+        with Image.open(source) as verified:
+            verified.verify()
+        source.seek(0)
+        with Image.open(source) as decoded:
+            decoded.load()
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        raise HTTPException(422, "Invalid or unsupported image") from None
+    finally:
+        source.seek(0)
 
 
 def library_filters(
