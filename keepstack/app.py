@@ -251,6 +251,14 @@ def asset_detail(uuid: str, user: dict = Depends(require_user)):
 def update_asset(uuid: str, request: Request, body: dict = Body(...),
                  user: dict = Depends(require_role("contributor"))):
     a = _get_asset_or_404(uuid)
+    desired_tags = None
+    if "tags" in body:
+        names = body["tags"]
+        if not isinstance(names, list) or any(
+            not isinstance(name, str) or not name.strip() or "\x00" in name for name in names
+        ):
+            raise HTTPException(422, "Tags must be a list of non-empty names")
+        desired_tags = {name.strip().lower() for name in names}
     editable = {"title", "description", "alt_text", "license", "rights_statement",
                 "credit", "usage_expiry", "retention_until", "dc_creator",
                 "dc_subject", "dc_publisher", "dc_date", "status"}
@@ -259,12 +267,22 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
         if k in editable:
             sets.append(f"{k} = ?")
             vals.append(v)
-    if sets:
+    if sets or desired_tags is not None:
         sets.append("updated_at = ?")
         vals.extend([now_iso(), a["id"]])
         with transaction() as conn:
             conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE id = ?", vals)
-        ingest.reindex_fts(a["id"])
+            if desired_tags is not None:
+                current_tags = {row["name"]: row["id"] for row in conn.execute(
+                    "SELECT t.id, t.name FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+                    "WHERE at.asset_id = ?", (a["id"],))}
+                conn.executemany("DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = ?",
+                                 ((a["id"], current_tags[name]) for name in current_tags.keys() - desired_tags))
+                for name in sorted(desired_tags - current_tags.keys()):
+                    conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
+                    conn.execute("INSERT INTO asset_tags (asset_id, tag_id, source) "
+                                 "SELECT ?, id, 'manual' FROM tags WHERE name = ?", (a["id"], name))
+            ingest.reindex_fts(a["id"], conn)
         ingest.reindex_embedding(a["id"])
         log("asset.update", user=user, target_type="asset", target_id=uuid,
             detail=",".join(body.keys()), ip=client_ip(request))
