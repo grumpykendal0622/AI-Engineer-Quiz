@@ -22,4 +22,5 @@
 
 ## 交付
 
-- [ ] 更新 `SUBMISSION.md`，复跑本地验证，确认 Draft PR 对应最终 SHA 的全部 CI；保持 Draft，交用户评审后再决定合并。
+- [x] 更新 [SUBMISSION.md](SUBMISSION.md)，记录本地 40 项 pytest 通过及 4 条浏览器回归；已核对功能提交的 [CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45754622275)。
+- [ ] 用户验收：打开新版，确认集合、上传、搜索和导出，再将 Draft 转为 Ready for review；评审通过后才合入 Fork 的 `main`。本项是人工合并门槛，不是待修功能。
