@@ -8,9 +8,10 @@ every mutating endpoint.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from sqlite3 import Connection
 from typing import Optional
 
-from .db import get_conn
+from .db import transaction
 
 
 def now_iso() -> str:
@@ -25,8 +26,12 @@ def log(
     target_id: Optional[object] = None,
     detail: Optional[str] = None,
     ip: Optional[str] = None,
+    conn: Connection | None = None,
 ) -> None:
-    conn = get_conn()
+    if conn is None:
+        with transaction() as conn:
+            log(action, user=user, target_type=target_type, target_id=target_id, detail=detail, ip=ip, conn=conn)
+        return
     conn.execute(
         """INSERT INTO audit_log (ts, user_id, username, action, target_type, target_id, detail, ip)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -41,4 +46,3 @@ def log(
             ip,
         ),
     )
-    conn.commit()

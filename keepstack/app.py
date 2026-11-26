@@ -10,6 +10,7 @@ import csv
 import io
 import ipaddress
 import json
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -285,6 +286,13 @@ def asset_detail(uuid: str, user: dict = Depends(require_user)):
 def update_asset(uuid: str, request: Request, body: dict = Body(...),
                  user: dict = Depends(require_role("contributor"))):
     a = _get_asset_or_404(uuid)
+    retention = body.get("retention_until")
+    if retention not in (None, ""):
+        try:
+            if not isinstance(retention, str) or date.fromisoformat(retention).isoformat() != retention:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(422, "Retention until must be a date in YYYY-MM-DD format") from None
     desired_tags = None
     if "tags" in body:
         names = body["tags"]
@@ -313,6 +321,7 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
     if reindex or desired_collections is not None:
         sets.append("updated_at = ?")
         vals.extend([now_iso(), a["id"]])
+        ip = client_ip(request)
         with transaction() as conn:
             conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE id = ?", vals)
             if desired_collections is not None:
@@ -323,26 +332,30 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
                     raise HTTPException(409, "One of the selected collections no longer exists")
                 current_collections = {row["collection_id"] for row in conn.execute(
                     "SELECT collection_id FROM collection_assets WHERE asset_id = ?", (a["id"],))}
-                conn.executemany("DELETE FROM collection_assets WHERE asset_id = ? AND collection_id = ?",
-                                 ((a["id"], collection_id) for collection_id in current_collections - desired_collections))
+                for collection_id in sorted(current_collections - desired_collections):
+                    conn.execute("DELETE FROM collection_assets WHERE asset_id = ? AND collection_id = ?",
+                                 (a["id"], collection_id))
+                    log_collection_removal(conn, user, collection_id, uuid, ip)
                 conn.executemany("INSERT INTO collection_assets (asset_id, collection_id, added_at) VALUES (?,?,?)",
                                  ((a["id"], collection_id, now_iso()) for collection_id in desired_collections - current_collections))
             if desired_tags is not None:
                 current_tags = {row["name"]: row["id"] for row in conn.execute(
                     "SELECT t.id, t.name FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
                     "WHERE at.asset_id = ?", (a["id"],))}
-                conn.executemany("DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = ?",
-                                 ((a["id"], current_tags[name]) for name in current_tags.keys() - desired_tags))
+                for name in sorted(current_tags.keys() - desired_tags):
+                    conn.execute("DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = ?",
+                                 (a["id"], current_tags[name]))
+                    log("tag.remove", user=user, target_type="asset", target_id=uuid, detail=name, ip=ip, conn=conn)
                 for name in sorted(desired_tags - current_tags.keys()):
                     conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
                     conn.execute("INSERT INTO asset_tags (asset_id, tag_id, source) "
                                  "SELECT ?, id, 'manual' FROM tags WHERE name = ?", (a["id"], name))
             if reindex:
                 ingest.reindex_fts(a["id"], conn)
+            log("asset.update", user=user, target_type="asset", target_id=uuid,
+                detail=",".join(body.keys()), ip=ip, conn=conn)
         if reindex:
             ingest.reindex_embedding(a["id"])
-        log("asset.update", user=user, target_type="asset", target_id=uuid,
-            detail=",".join(body.keys()), ip=client_ip(request))
     return asset_detail(uuid, user)
 
 
@@ -409,14 +422,20 @@ def add_tag(uuid: str, request: Request, body: dict = Body(...),
     return {"ok": True}
 
 
-@app.delete("/api/assets/{uuid}/tags/{name}")
-def remove_tag(uuid: str, name: str, user: dict = Depends(require_role("contributor"))):
+@app.delete("/api/assets/{uuid}/tags/{name:path}")
+def remove_tag(uuid: str, name: str, request: Request, user: dict = Depends(require_role("contributor"))):
     a = _get_asset_or_404(uuid)
+    name = name.strip().lower()
     with transaction() as conn:
-        conn.execute(
+        removed = conn.execute(
             "DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = "
-            "(SELECT id FROM tags WHERE name = ?)", (a["id"], name.lower()))
-    ingest.reindex_fts(a["id"])
+            "(SELECT id FROM tags WHERE name = ?)", (a["id"], name)).rowcount
+        if removed:
+            ingest.reindex_fts(a["id"], conn)
+            log("tag.remove", user=user, target_type="asset", target_id=uuid,
+                detail=name, ip=client_ip(request), conn=conn)
+    if removed:
+        ingest.reindex_embedding(a["id"])
     return {"ok": True}
 
 
@@ -555,28 +574,47 @@ def add_to_collection(cid: int, body: dict = Body(...),
 
 
 @app.delete("/api/collections/{cid}/assets/{uuid}")
-def remove_from_collection(cid: int, uuid: str, user: dict = Depends(require_role("contributor"))):
+def remove_from_collection(cid: int, uuid: str, request: Request, user: dict = Depends(require_role("contributor"))):
     with transaction() as conn:
-        conn.execute(
+        removed = conn.execute(
             "DELETE FROM collection_assets WHERE collection_id = ? AND asset_id = "
-            "(SELECT id FROM assets WHERE uuid = ?)", (cid, uuid))
+            "(SELECT id FROM assets WHERE uuid = ?)", (cid, uuid)).rowcount
+        if removed:
+            log_collection_removal(conn, user, cid, uuid, client_ip(request))
     return {"ok": True}
+
+
+def log_collection_removal(conn, user, cid, uuid, ip):
+    log("collection.remove", user=user, target_type="collection", target_id=cid, detail=uuid, ip=ip, conn=conn)
 
 
 # ---------------------------------------------------------------------------
 # Sharing (public, tokenised, expiring links)
 # ---------------------------------------------------------------------------
+def parse_share_expiry(value: str) -> datetime:
+    expiry = datetime.fromisoformat(value.removesuffix("Z") + ("+00:00" if value.endswith("Z") else ""))
+    return expiry.replace(tzinfo=timezone.utc) if expiry.tzinfo is None else expiry.astimezone(timezone.utc)
+
+
 @app.post("/api/shares")
 def create_share(request: Request, body: dict = Body(...),
                  user: dict = Depends(require_role("contributor"))):
     import secrets
     token = secrets.token_urlsafe(16)
+    expiry = body.get("expires_at")
+    if expiry not in (None, ""):
+        try:
+            if not isinstance(expiry, str):
+                raise ValueError
+            expiry = parse_share_expiry(expiry).isoformat()
+        except (ValueError, OverflowError):
+            raise HTTPException(422, "Enter an ISO 8601 share expiry") from None
     with transaction() as conn:
         conn.execute(
             "INSERT INTO share_links (token, target_type, target_id, permission, expires_at, "
             "max_downloads, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
             (token, body.get("target_type", "asset"), body["target_id"],
-             body.get("permission", "view"), body.get("expires_at"),
+             body.get("permission", "view"), expiry,
              body.get("max_downloads"), user["id"], now_iso()))
     log("share.create", user=user, target_type=body.get("target_type"), target_id=body["target_id"])
     return {"token": token, "url": f"{config.base_url}/s/{token}"}
@@ -605,8 +643,13 @@ def _valid_share(token: str) -> dict:
     if not row:
         raise HTTPException(404, "Invalid or revoked link")
     s = dict(row)
-    if s["expires_at"] and s["expires_at"] < now_iso():
-        raise HTTPException(410, "Link expired")
+    if s["expires_at"]:
+        try:
+            expired = parse_share_expiry(s["expires_at"]) <= datetime.now(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            expired = True
+        if expired:
+            raise HTTPException(410, "Link expired")
     if s["max_downloads"] and s["download_count"] >= s["max_downloads"]:
         raise HTTPException(410, "Download limit reached")
     return s

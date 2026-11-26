@@ -760,7 +760,10 @@ async function uploadItems(items) {
   }
   uploadBusy = false;
   syncUploadBatch();
-  if (added && session === sessionVersion) { loadLibrary(); loadFilterOptions(); }
+  if (added && session === sessionVersion) {
+    refreshAssetViews({ tags: true });
+    if (!$("#view-audit").classList.contains("hidden")) loadAudit();
+  }
 }
 
 // ---------- collections ----------
@@ -1062,10 +1065,18 @@ $("#btn-new-user").addEventListener("click", async () => {
 });
 
 // ---------- audit ----------
+let auditVersion = 0;
 async function loadAudit() {
   const session = sessionVersion;
-  const data = await api("/api/audit");
-  if (session !== sessionVersion) return;
+  const version = ++auditVersion;
+  let data;
+  try {
+    data = await api("/api/audit", { cache: "no-store" });
+  } catch {
+    if (session === sessionVersion && version === auditVersion) toast("Could not load the audit log. Try again.", "err");
+    return;
+  }
+  if (session !== sessionVersion || version !== auditVersion) return;
   $("#audit-rows").innerHTML = data.entries.map(e =>
     `<tr><td>${(e.ts||"").slice(0,19).replace("T"," ")}</td><td>${esc(e.username||"-")}</td><td>${esc(e.action)}</td>
      <td>${esc(e.target_type||"")} ${esc((e.target_id||"").slice(0,8))}</td><td>${esc(e.detail||"")}</td><td>${esc(e.ip||"")}</td></tr>`).join("");
