@@ -148,6 +148,10 @@
               </div>
               <button id="collection-add-assets" class="btn btn-primary hidden" type="button">+ Add assets</button>
             </div>
+            <div id="collection-description-row" class="collection-description-row hidden">
+              <p id="collection-description" class="muted" aria-live="polite"></p>
+              <button id="collection-edit-description" class="btn btn-ghost hidden" type="button">Edit description</button>
+            </div>
             <p id="collection-count" class="muted" aria-live="polite"></p>
             <div id="collection-grid" class="grid"></div>
             <div id="collection-status" class="empty hidden" role="status"></div>
@@ -215,10 +219,22 @@
     <form id="collection-create-form">
       <h3 id="collection-create-title">New collection</h3>
       <label class="filter-field">Collection name<input id="collection-new-name" required maxlength="80"></label>
+      <label class="filter-field">Description (optional)<textarea id="collection-new-description" rows="3"></textarea></label>
       <p id="collection-create-error" class="error" role="alert"></p>
       <div class="btn-row">
         <button type="button" class="btn" id="collection-create-cancel">Cancel</button>
         <button type="submit" class="btn btn-primary">Create empty collection</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="collection-description-dialog" class="collection-dialog" aria-labelledby="collection-description-title">
+    <form id="collection-description-form">
+      <h3 id="collection-description-title">Edit collection description</h3>
+      <label class="filter-field">Description (optional)<textarea id="collection-description-input" rows="4"></textarea></label>
+      <p id="collection-description-error" class="error" role="alert"></p>
+      <div class="btn-row">
+        <button type="button" class="btn" id="collection-description-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save changes</button>
       </div>
     </form>
   </dialog>

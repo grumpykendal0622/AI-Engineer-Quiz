@@ -108,7 +108,8 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .filter-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: stretch; gap: var(--s2); margin-top: var(--s2); }
 .filter-field { display: grid; align-content: center; gap: 5px; min-width: 0; font-weight: 600; }
 .filter-options > .filter-field { align-content: space-between; }
-.filter-field input, .filter-field select { width: 100%; font: inherit; font-weight: 400; min-height: 38px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--base-3); color: var(--text); background: var(--base-0); }
+.filter-field input, .filter-field select, .filter-field textarea { width: 100%; font: inherit; font-weight: 400; min-height: 38px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--base-3); color: var(--text); background: var(--base-0); }
+.filter-field textarea { resize: vertical; }
 .tag-filter { position: relative; min-width: 0; --filter-sign: #146447; --filter-bg: #eaf7f1; }
 .exclude-filter { --filter-sign: #8b451e; --filter-bg: #fff1e8; }
 .tag-filter { display: grid; align-content: space-between; gap: 5px; }
@@ -264,12 +265,16 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .collection-breadcrumb { display: flex; align-items: center; gap: var(--s1); }
 .collection-breadcrumb .btn { color: var(--accent); padding-inline-start: 0; }
 .collection-breadcrumb h2 { overflow-wrap: anywhere; min-width: 0; }
+.collection-description-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin-bottom: var(--s3); }
+#collection-description { flex: 1 1 280px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#collection-edit-description { color: var(--accent); }
 #collection-count { margin: 0 0 var(--s2); }
 .asset-card { padding: 0; text-align: left; color: var(--text); font: inherit; }
 .asset-card .meta { width: 100%; min-width: 0; }
 .collection-dialog { background: var(--base-1); color: var(--text); border: 1px solid var(--base-3); border-radius: var(--radius); padding: var(--s3); width: min(480px, 94vw); }
 .collection-dialog::backdrop { background: rgba(29,36,51,.35); }
 .collection-dialog h3 { margin: 0 0 var(--s2); }
+.collection-dialog .filter-field + .filter-field { margin-top: var(--s2); }
 .collection-dialog .btn:disabled, .collection-delete:disabled { opacity: .55; cursor: default; }
 .asset-picker { width: min(720px, 94vw); }
 .picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(138px, 1fr)); gap: var(--s1); }

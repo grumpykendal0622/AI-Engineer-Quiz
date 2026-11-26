@@ -239,6 +239,61 @@ def test_collections_and_one_save_edit_round_trip(page):
     assert 'team/brand, "中文"' in json.loads(row["tags"])
 
 
+def test_collection_description_is_optional_editable_and_above_assets(page):
+    login(page)
+    locator = page.locator
+    locator("[data-view=collections]").click()
+    locator("#btn-new-collection").click()
+    locator("#collection-new-name").fill("Harbor selects")
+    initial = "港口活动\nReview selects for the fall campaign."
+    locator("#collection-new-description").fill(initial)
+    page.get_by_role("button", name="Create empty collection").click()
+    card = locator(".collection-card", has_text="Harbor selects")
+    expect(card).to_contain_text("港口活动")
+    card.click()
+    description = locator("#collection-description")
+    expect(description).to_be_visible()
+    assert description.text_content() == initial
+
+    edit = locator("#collection-edit-description")
+    dialog = locator("#collection-description-dialog")
+    field = locator("#collection-description-input")
+    save = dialog.get_by_role("button", name="Save changes")
+    edit.click()
+    expect(field).to_have_value(initial)
+    field.fill("Unsaved draft")
+    dialog.get_by_role("button", name="Cancel").click()
+    assert description.text_content() == initial
+    edit.click()
+    field.fill("  ")
+    save.click()
+    expect(description).to_be_hidden()
+    expect(edit).to_have_text("Add description")
+
+    edit.click()
+    updated = '港口活动, "精选"\nFall campaign photography for the editorial team.'
+    field.fill(updated)
+    page.route("**/api/collections/*", lambda route: route.fulfill(status=500), times=1)
+    save.click()
+    expect(dialog.get_by_role("alert")).to_contain_text("Your changes are still here")
+    expect(field).to_have_value(updated)
+    save.click()
+    expect(dialog).to_be_hidden()
+
+    locator("#collection-add-assets").click()
+    locator("#collection-picker-grid input").first.check()
+    locator("#collection-picker-add").click()
+    expect(locator("#collection-count")).to_have_text("1 asset")
+    page.reload()
+    locator("[data-view=collections]").click()
+    expect(card).to_contain_text('港口活动, "精选"')
+    card.click()
+    image = locator("#collection-grid img").first
+    expect(image).to_be_visible()
+    assert description.text_content() == updated
+    assert description.bounding_box()["y"] < image.bounding_box()["y"]
+
+
 def test_viewer_session_and_filter_directory_failure(page):
     login(page)
     locator = page.locator
@@ -253,6 +308,8 @@ def test_viewer_session_and_filter_directory_failure(page):
     expect(locator(".collection-delete")).to_have_count(0)
     locator(".collection-card", has_text="Civic Communications").click()
     expect(locator("#collection-add-assets")).to_be_hidden()
+    expect(locator("#collection-description")).to_have_text("Posters, banners, notices for public outreach")
+    expect(locator("#collection-edit-description")).to_be_hidden()
     locator("#collection-grid .card").first.click()
     expect(locator("#d-download")).to_be_visible()
     expect(locator("#d-save")).to_have_count(0)
