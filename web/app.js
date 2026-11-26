@@ -30,7 +30,7 @@ async function api(path, opts = {}) {
         $("#login-error").classList.remove("hidden");
       }
     }
-    throw new Error("unauthorised");
+    throw Object.assign(new Error("unauthorised"), { status: res.status });
   }
   if (!res.ok) {
     const text = await res.text();
@@ -39,7 +39,7 @@ async function api(path, opts = {}) {
       const detail = JSON.parse(text).detail;
       if (typeof detail === "string") message = detail;
     } catch {}
-    throw new Error(message);
+    throw Object.assign(new Error(message), { status: res.status });
   }
   return !opts.raw && res.headers.get("content-type")?.includes("json") ? res.json() : res;
 }
@@ -69,7 +69,14 @@ $("#login-form").addEventListener("submit", async (e) => {
     const r = await api("/api/auth/login", { json: { username: $("#login-user").value, password: $("#login-pass").value } });
     state.token = r.token; localStorage.setItem("keepstack_token", r.token);
     state.user = r.user; enterApp();
-  } catch { $("#login-error").textContent = "Invalid credentials"; $("#login-error").classList.remove("hidden"); }
+  } catch (error) {
+    const message = {
+      401: "Invalid credentials",
+      429: "Too many failed attempts. Try again later.",
+    }[error.status] || "Could not sign in. Please try again.";
+    $("#login-error").textContent = message;
+    $("#login-error").classList.remove("hidden");
+  }
 });
 $("#btn-logout").addEventListener("click", () => { if (canLeaveAsset()) logout(); });
 function logout() {
