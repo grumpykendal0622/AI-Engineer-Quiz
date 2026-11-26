@@ -238,9 +238,13 @@ def test_viewer_session_and_filter_directory_failure(page):
     expect(locator("#filter-error")).to_be_hidden()
     locator("#include-tags summary").press("Enter")
     expect(locator("#include-tags input")).to_be_visible()
-    assert page.evaluate("document.documentElement.scrollWidth === innerWidth")
+    viewport = page.evaluate("""() => ({
+        width: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+    })""")
+    assert viewport["scrollWidth"] <= viewport["width"] + 1, viewport
     popup = locator("#include-tags .tag-picker").bounding_box()
-    assert popup["x"] >= 0 and popup["x"] + popup["width"] <= 360
+    assert popup["x"] >= 0 and popup["x"] + popup["width"] <= viewport["width"], (popup, viewport)
     locator("#include-tags input").press("Escape")
     expect(locator("#include-tags input")).to_be_hidden()
     page.route("**/api/assets/export.csv?*", lambda route: route.fulfill(status=401, body="test-expiry"), times=1)
