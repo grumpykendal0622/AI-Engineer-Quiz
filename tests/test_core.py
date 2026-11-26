@@ -335,6 +335,99 @@ def test_combined_edit_rejects_invalid_tags_and_rolls_back_on_index_failure(
     assert library_client.get("/api/assets", params={"q": "should not persist"}).json()["total"] == 0
 
 
+def test_collection_bulk_add_and_delete_keep_originals(library_client, harbor_demo):
+    original_collection, assets = harbor_demo
+    first = assets["Harbor view 01"]["uuid"]
+    second = assets["Harbor view 02"]["uuid"]
+    deleted = assets["Harbor deleted"]["uuid"]
+    response = library_client.post("/api/collections", json={"name": "Bulk test"})
+    assert response.status_code == 200
+    collection_id = response.json()["id"]
+    endpoint = f"/api/collections/{collection_id}"
+
+    def members():
+        return library_client.get("/api/assets", params={"collection_id": collection_id}).json()["items"]
+
+    try:
+        assert members() == []
+        assert library_client.post("/api/collections", json={"name": "  BULK test "}).status_code == 409
+        assert library_client.post(endpoint + "/assets", json={"uuids": [first, deleted]}).status_code == 409
+        assert members() == []
+        assert library_client.post(endpoint + "/assets", json={"uuids": [first, second, first]}).json()["added"] == 2
+        assert library_client.post(endpoint + "/assets", json={"uuids": [first, second]}).json()["added"] == 0
+        assert {item["uuid"] for item in members()} == {first, second}
+        assert library_client.get(endpoint + "/candidates", params={"limit": 0}).status_code == 422
+        candidates = library_client.get(endpoint + "/candidates", params={"limit": 200}).json()
+        assert {item["uuid"] for item in candidates["items"] if item["already_added"]} == {first, second}
+        assert deleted not in {item["uuid"] for item in candidates["items"]}
+        conn = get_conn()
+        deleted_id = assets["Harbor deleted"]["id"]
+        conn.execute("INSERT INTO collection_assets (collection_id, asset_id) VALUES (?, ?)",
+                     (collection_id, deleted_id))
+        conn.commit()
+        catalog = library_client.get("/api/collections").json()["collections"]
+        assert next(item["asset_count"] for item in catalog if item["id"] == collection_id) == 2
+        assert library_client.delete(endpoint).status_code == 200
+        assert library_client.get(endpoint + "/candidates").status_code == 404
+        detail = library_client.get(f"/api/assets/{first}").json()
+        assert [item["id"] for item in detail["collections"]] == [original_collection]
+        assert library_client.get(f"/api/assets/{second}/file").status_code == 200
+    finally:
+        library_client.delete(endpoint)
+
+
+def test_asset_edit_saves_membership_with_tags_and_metadata(library_client, harbor_demo):
+    original_collection, assets = harbor_demo
+    asset = assets["Harbor view 04"]
+    path = f"/api/assets/{asset['uuid']}"
+    detail = library_client.get(path).json()
+    original_tags = [item["name"] for item in detail["tags"]]
+    collection = library_client.post("/api/collections", json={"name": "Combined edit test"}).json()["id"]
+    try:
+        body = {"title": "Collection membership update", "tags": [*original_tags, "move/marker"],
+                "collection_ids": [collection, collection]}
+        assert library_client.patch(path, json={**body, "collection_ids": [True]}).status_code == 422
+        assert library_client.patch(path, json={**body, "collection_ids": [2**40]}).status_code == 409
+        unchanged = library_client.get(path).json()
+        assert unchanged["asset"]["title"] == detail["asset"]["title"]
+        assert unchanged["collections"] == detail["collections"]
+        assert unchanged["tags"] == detail["tags"]
+        edited = library_client.patch(path, json=body)
+        assert edited.status_code == 200
+        assert [item["id"] for item in edited.json()["collections"]] == [collection]
+        params = {"q": "collection membership update", "include_tag": "move/marker"}
+        assert library_client.get("/api/assets", params={**params, "collection_id": original_collection}).json()["total"] == 0
+        row, = read_export(library_client.get("/api/assets/export.csv", params={**params, "collection_id": collection}))
+        assert row["uuid"] == asset["uuid"]
+        assert library_client.patch(path, json={"collection_ids": []}).json()["collections"] == []
+        assert library_client.get("/api/assets", params=params).json()["total"] == 1
+    finally:
+        library_client.patch(path, json={"title": asset["title"], "tags": original_tags,
+                                         "collection_ids": [original_collection]})
+        library_client.delete(f"/api/collections/{collection}")
+
+
+def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
+    collection, assets = harbor_demo
+    asset = assets["Harbor view 05"]["uuid"]
+    edit_path = f"/api/assets/{asset}"
+    collection_path = f"/api/collections/{collection}"
+    for role in ("viewer", "contributor", "editor"):
+        name = "test_collections_" + role
+        password = "test-only-password"
+        created = library_client.post("/api/users", json={"username": name, "password": password, "role": role})
+        assert created.status_code == 200
+        login = library_client.post("/api/auth/login", json={"username": name, "password": password})
+        assert login.status_code == 200
+        headers = {"Authorization": "Bearer " + login.json()["token"]}
+        assert library_client.get("/api/collections", headers=headers).status_code == 200
+        expected_edit = 403 if role == "viewer" else 200
+        assert library_client.get(collection_path + "/candidates", headers=headers).status_code == expected_edit
+        assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=headers).status_code == expected_edit
+        assert library_client.post(collection_path + "/assets", json={"uuids": [asset]}, headers=headers).status_code == expected_edit
+        assert library_client.delete("/api/collections/999999", headers=headers).status_code == (404 if role == "editor" else 403)
+
+
 def test_semantic_search_returns_ranked_results():
     ingest.ingest_stream(io.BytesIO(_img_bytes(color=(40, 150, 90), size=(330, 500))),
                          "mountain_trail.jpg", title="Mountain trail in the alpine forest")

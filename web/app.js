@@ -7,7 +7,8 @@ let sessionVersion = 0;
 let tagCatalog = [];
 let recentTags = [];
 let filterOptionsVersion = 0;
-let fromCollections = false;
+let collectionCatalog = [], collectionCatalogVersion = 0;
+let collectionViewId = null, collectionOffset = 0, collectionTotal = 0, collectionVersion = 0;
 const pageSize = 12;
 let offset = 0, matchTotal = 0, libraryVersion = 0, libraryReady = false;
 let exporting = false;
@@ -80,7 +81,11 @@ function logout() {
   $("#sort").value = "newest";
   tagCatalog = [];
   recentTags = [];
-  fromCollections = false;
+  collectionCatalog = [];
+  collectionViewId = null;
+  collectionOffset = collectionTotal = 0;
+  $("#collection-create-dialog").close();
+  $("#collection-asset-picker").close();
   $("#filter-collection").replaceChildren(new Option("All collections", ""));
   $("#filter-error").classList.add("hidden");
   for (const picker of $$(".tag-filter details")) {
@@ -94,7 +99,7 @@ function logout() {
   $("#library-loading").classList.add("hidden");
   $("#library-error").classList.add("hidden");
   $("#result-title").textContent = "Library";
-  for (const selector of ["#grid", "#drawer-body", "#collection-list",
+  for (const selector of ["#grid", "#drawer-body", "#collection-list", "#collection-grid", "#collection-picker-grid",
     "#stat-cards", "#fixity-result", "#user-rows", "#audit-rows", "#upload-list", "#user-label"]) {
     $(selector).replaceChildren();
   }
@@ -111,21 +116,30 @@ function enterApp() {
   $("#user-label").textContent = `${state.user.username} (${state.user.role})`;
   const isAdmin = state.user.role === "admin";
   $$(".admin-only").forEach(el => el.classList.toggle("hidden", !isAdmin));
-  $("#btn-upload").classList.toggle("hidden", state.user.role === "viewer");
+  for (const selector of ["#btn-upload", "#btn-new-collection", "#collection-add-assets"]) {
+    $(selector).classList.toggle("hidden", !canEditAssets());
+  }
   showView("library");
 }
 
 // ---------- navigation ----------
+function canEditAssets() {
+  return ["admin", "editor", "contributor"].includes(state.user?.role);
+}
+
+function canDeleteAssets() {
+  return ["admin", "editor"].includes(state.user?.role);
+}
+
 $$(".nav-item").forEach(btn => btn.addEventListener("click", () => showView(btn.dataset.view)));
 function showView(view) {
   $$(".nav-item").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
   $$(".view").forEach(panel => panel.classList.toggle("hidden", panel.id !== "view-" + view));
   if (view === "library") {
-    $("#back-to-collections").classList.toggle("hidden", !fromCollections);
     loadFilterOptions();
     loadLibrary();
   }
-  if (view === "collections") loadCollections();
+  if (view === "collections") showCollectionList();
   if (view === "dashboard") loadDashboard();
   if (view === "users") loadUsers();
   if (view === "audit") loadAudit();
@@ -147,7 +161,6 @@ $("#filter-clear").addEventListener("click", () => {
   Object.assign(state, initialFilters, { sort });
   updateFilters();
 });
-$("#back-to-collections").addEventListener("click", () => showView("collections"));
 $("#page-prev").addEventListener("click", () => movePage(-pageSize));
 $("#page-next").addEventListener("click", () => movePage(pageSize));
 $("#library-retry").addEventListener("click", loadLibrary);
@@ -310,13 +323,12 @@ async function loadFilterOptions() {
   const session = sessionVersion;
   const version = ++filterOptionsVersion;
   try {
-    const [collections, tags] = await Promise.all([api("/api/collections"), api("/api/tags", { cache: "no-store" })]);
+    const [catalogLoaded, tags] = await Promise.all([loadCollectionCatalog(), api("/api/tags", { cache: "no-store" })]);
     if (session !== sessionVersion || version !== filterOptionsVersion) return;
-    $("#filter-collection").replaceChildren(new Option("All collections", ""),
-      ...collections.collections.map(item => new Option(item.name, item.id)));
     tagCatalog = tags.tags.map(tag => tag.name);
     Object.keys(tagPickers).forEach(renderTagOptions);
-    $("#filter-error").classList.add("hidden");
+    $("#filter-error").textContent = "Could not load collections. Reopen Library to retry.";
+    $("#filter-error").classList.toggle("hidden", catalogLoaded);
     syncFilters();
   } catch {
     if (session !== sessionVersion || version !== filterOptionsVersion) return;
@@ -369,15 +381,19 @@ function renderGrid(items, total) {
   $("#empty").textContent = conflict ? `“${conflict}” is both included and excluded. Remove one condition.`
     : $("#active-filters").childElementCount ? "No assets match these filters. Try removing a condition." : "No assets yet. Click Upload to get started.";
   $("#empty").classList.toggle("hidden", items.length > 0);
-  $("#grid").innerHTML = items.map(a => `
-    <div class="card" data-uuid="${a.uuid}">
+  renderAssetCards($("#grid"), items);
+}
+
+function renderAssetCards(grid, items) {
+  grid.innerHTML = items.map(a => `
+    <button class="card asset-card" data-uuid="${a.uuid}" type="button">
       <img class="thumb" loading="lazy" src="/api/assets/${a.uuid}/thumb" alt="${esc(a.alt_text || a.title)}">
-      <div class="meta">
+      <span class="meta">
         <span class="title" title="${esc(a.title)}">${esc(a.title)}</span>
         <span class="sub"><span class="badge">${a.media_type}</span><span>${fmtBytes(a.size)}</span></span>
-      </div>
-    </div>`).join("");
-  $$("#grid .card").forEach(c => c.addEventListener("click", () => openAsset(c.dataset.uuid)));
+      </span>
+    </button>`).join("");
+  $$(".card", grid).forEach(card => card.addEventListener("click", () => openAsset(card.dataset.uuid)));
 }
 
 // ---------- asset detail drawer ----------
@@ -418,7 +434,7 @@ async function openAsset(uuid) {
   ]);
   if (session !== sessionVersion || version !== drawerVersion) return;
   const a = d.asset;
-  const canEdit = ["admin","editor","contributor"].includes(state.user.role);
+  const canEdit = canEditAssets();
   const preview = a.media_type === "image"
     ? `<img class="detail-preview" src="/api/assets/${uuid}/preview" alt="${esc(a.alt_text||a.title)}">`
     : `<img class="detail-preview" src="/api/assets/${uuid}/thumb" alt="${esc(a.title)}">`;
@@ -429,11 +445,11 @@ async function openAsset(uuid) {
     <div class="btn-row">
       <button class="btn" id="d-download" type="button">Download original</button>
       ${canEdit?`<button class="btn" id="d-share">Create share link</button>`:""}
-      ${["admin","editor"].includes(state.user.role)?`<button class="btn btn-danger" id="d-delete">Delete</button>`:""}
+      ${canDeleteAssets()?`<button class="btn btn-danger" id="d-delete">Delete</button>`:""}
     </div>
 
     ${canEdit ? `<form class="detail-section" id="asset-edit"><fieldset>
-      <legend>Edit metadata &amp; tags</legend>
+      <legend>Edit asset</legend>
       <div class="edit-grid">
         <label>Title<input id="e-title" value="${esc(a.title)}"></label>
         <label>Description<textarea id="e-description" rows="2">${esc(a.description)}</textarea></label>
@@ -449,11 +465,19 @@ async function openAsset(uuid) {
           <input class="tag-add" id="tag-add" aria-label="New tag" placeholder="Enter a tag" autocomplete="off">
           <button class="btn" id="tag-stage" type="button">Add tag</button>
         </div>
-        <p class="muted edit-tag-help">Tag changes apply when you save.</p>
+      </div>
+      <div class="edit-tags edit-collections">
+        <h4>Collections</h4>
+        <div class="tag-row" id="asset-collection-row"></div>
+        <div class="btn-row">
+          <select id="asset-collection-add" aria-label="Add to collection"></select>
+        </div>
+        <p class="muted edit-tag-help">Save to apply tag and collection changes. Removing a collection here does not delete the asset.</p>
       </div>
       <div class="btn-row"><button class="btn btn-primary" id="d-save" type="submit" disabled>Save changes</button>
         <span id="edit-message" role="status"></span></div>
-    </fieldset></form>` : `<div class="detail-section"><h4>Tags</h4><div class="tag-row" id="tag-row"></div></div>`}
+    </fieldset></form>` : `<div class="detail-section"><h4>Tags</h4><div class="tag-row" id="tag-row"></div></div>
+      <div class="detail-section"><h4>Collections</h4><div class="tag-row" id="asset-collection-row"></div></div>`}
 
     ${sim.items.length?`<div class="detail-section"><h4>Similar assets</h4>
       <div class="similar-strip">${sim.items.slice(0,8).map(s=>`<img src="/api/assets/${s.uuid}/thumb" data-uuid="${s.uuid}" title="${esc(s.title)}">`).join("")}</div></div>`:""}
@@ -485,13 +509,16 @@ async function openAsset(uuid) {
   });
   $$("#drawer-body .similar-strip img").forEach(img => img.addEventListener("click", () => openAsset(img.dataset.uuid)));
   if (canEdit) {
-    bindAssetEditor(uuid, d.tags);
+    bindAssetEditor(uuid, d.tags, d.collections);
     $("#d-share")?.addEventListener("click", async () => {
       const r = await api("/api/shares", { json: { target_type: "asset", target_id: a.id, permission: "download" } });
       await navigator.clipboard?.writeText(r.url).catch(()=>{});
       toast("Share link copied: " + r.url);
     });
-  } else renderDetailTags(d.tags);
+  } else {
+    renderDetailChips($("#tag-row"), d.tags, "tag");
+    renderDetailChips($("#asset-collection-row"), d.collections, "collection");
+  }
   $("#d-delete")?.addEventListener("click", async () => {
     if ($("#asset-edit fieldset")?.disabled) return;
     if (!confirm("Delete this asset?")) return;
@@ -499,52 +526,73 @@ async function openAsset(uuid) {
     if (session !== sessionVersion) return;
     toast("Deleted");
     if (version === drawerVersion) resetDrawer();
-    loadLibrary();
+    refreshAssetViews({collections: true});
   });
 }
 
-function renderDetailTags(tags, removeTag) {
-  const row = $("#tag-row");
+function renderDetailChips(row, items, kind, removeItem) {
   row.replaceChildren();
-  if (!tags.length) row.textContent = "No tags";
-  for (const tag of tags) {
+  if (!items.length) row.textContent = kind === "tag" ? "No tags" : "No collections";
+  for (const item of items) {
     const chip = document.createElement("span");
     chip.className = "tag";
-    chip.textContent = tag.name;
-    if (removeTag) {
+    chip.textContent = item.name;
+    if (removeItem) {
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "rm";
-      remove.dataset.tag = tag.name;
+      if (kind === "tag") remove.dataset.tag = item.name;
       remove.textContent = "×";
-      remove.setAttribute("aria-label", "Remove tag: " + tag.name);
-      remove.addEventListener("click", () => removeTag(tag.name));
+      remove.setAttribute("aria-label", (kind === "tag" ? "Remove tag: " : "Remove from collection: ") + item.name);
+      remove.addEventListener("click", () => removeItem(item));
       chip.append(remove);
     }
     row.append(chip);
   }
 }
 
-function bindAssetEditor(uuid, tags) {
+function bindAssetEditor(uuid, tags, collections) {
   const form = $("#asset-edit");
   const fieldset = $("fieldset", form);
   const input = $("#tag-add");
   const save = $("#d-save");
   const add = $("#tag-stage");
+  const addCollection = $("#asset-collection-add");
   const message = $("#edit-message");
   const fields = ["title", "description", "alt_text", "dc_creator", "rights_statement", "retention_until"];
   const readFields = () => Object.fromEntries(fields.map(name => [name, $("#e-" + name, form).value]));
   const names = () => tags.map(tag => tag.name).sort();
+  const collectionIds = () => collections.map(item => item.id).sort((left, right) => left - right);
   let savedFields = readFields(), savedNames = names(), savedTags = tags;
+  let savedCollectionIds = collectionIds();
   const tagsChanged = () => JSON.stringify(names()) !== JSON.stringify(savedNames);
-  const dirty = () => Boolean(input.value.trim()) || tagsChanged()
+  const collectionsChanged = () => JSON.stringify(collectionIds()) !== JSON.stringify(savedCollectionIds);
+  const dirty = () => Boolean(input.value.trim()) || tagsChanged() || collectionsChanged()
     || fields.some(name => $("#e-" + name, form).value !== savedFields[name]);
   canLeaveAsset = () => !fieldset.disabled && (!dirty() || confirm("Discard unsaved changes?"));
   const sync = () => { save.disabled = fieldset.disabled || !dirty(); add.disabled = !input.value.trim(); };
-  const renderTags = () => renderDetailTags(tags, name => {
-    tags = tags.filter(tag => tag.name !== name);
+  const renderTags = () => renderDetailChips($("#tag-row"), tags, "tag", item => {
+    tags = tags.filter(tag => tag.name !== item.name);
     renderTags();
     input.focus({ preventScroll: true });
+    sync();
+  });
+  const renderCollections = () => {
+    renderDetailChips($("#asset-collection-row"), collections, "collection", item => {
+      collections = collections.filter(collection => collection.id !== item.id);
+      renderCollections();
+      addCollection.focus({ preventScroll: true });
+      sync();
+    });
+    const options = collectionCatalog.filter(item => !collections.some(collection => collection.id === item.id));
+    addCollection.replaceChildren(new Option("+ Add to collection", ""),
+      ...options.map(item => new Option(item.name, item.id)));
+    addCollection.disabled = options.length === 0;
+  };
+  addCollection.addEventListener("change", () => {
+    const item = collectionCatalog.find(collection => collection.id === Number(addCollection.value));
+    if (item) collections = [...collections, item];
+    renderCollections();
     sync();
   });
   const stageTag = () => {
@@ -574,7 +622,9 @@ function bindAssetEditor(uuid, tags) {
     const body = Object.fromEntries(fields.filter(name => values[name] !== savedFields[name])
       .map(name => [name, values[name]]));
     const changedTags = tagsChanged();
+    const changedCollections = collectionsChanged();
     if (changedTags) body.tags = names();
+    if (changedCollections) body.collection_ids = collectionIds();
     fieldset.disabled = true;
     message.textContent = "Saving…";
     message.className = "muted";
@@ -589,13 +639,15 @@ function bindAssetEditor(uuid, tags) {
         Object.keys(tagPickers).forEach(renderTagOptions);
       }
       savedNames = names();
+      collections = updated.collections;
+      savedCollectionIds = collectionIds();
       message.textContent = "Saved";
       $(".detail-title").textContent = updated.asset.title;
       $(".detail-preview").alt = updated.asset.alt_text || updated.asset.title;
       $("#dublin-core-values").innerHTML = dublinCoreRows(updated.asset.dublin_core);
       renderTags();
-      loadLibrary();
-      if (changedTags) loadFilterOptions();
+      renderCollections();
+      refreshAssetViews({tags: changedTags, collections: changedCollections});
     } catch {
       message.className = "error";
       message.textContent = "Could not save. Your changes are still here.";
@@ -605,6 +657,8 @@ function bindAssetEditor(uuid, tags) {
     }
   });
   renderTags();
+  renderCollections();
+  loadCollectionCatalog().then(() => { if (form.isConnected) renderCollections(); });
   sync();
 }
 
@@ -646,23 +700,266 @@ async function uploadFiles(files) {
 }
 
 // ---------- collections ----------
-async function loadCollections() {
+async function loadCollectionCatalog() {
   const session = sessionVersion;
-  const data = await api("/api/collections");
-  if (session !== sessionVersion) return;
-  $("#collection-list").innerHTML = data.collections.map(c =>
-    `<button type="button" class="collection-card" data-id="${c.id}"><span class="n">${esc(c.name)}</span><span class="muted">${c.asset_count} assets</span><span class="muted">${esc(c.description||"")}</span></button>`).join("")
+  const version = ++collectionCatalogVersion;
+  try {
+    const data = await api("/api/collections", { cache: "no-store" });
+    if (session !== sessionVersion || version !== collectionCatalogVersion) return true;
+    collectionCatalog = data.collections;
+    $("#filter-collection").replaceChildren(new Option("All collections", ""),
+      ...collectionCatalog.map(item => new Option(item.name, item.id)));
+    if (state.collection && !collectionCatalog.some(item => String(item.id) === state.collection)) {
+      state.collection = "";
+      if (!$("#view-library").classList.contains("hidden")) updateFilters();
+      else offset = 0;
+    }
+    syncFilters();
+    if (collectionViewId === null) renderCollectionList();
+    return true;
+  } catch {
+    if (session !== sessionVersion || version !== collectionCatalogVersion) return true;
+    if (!$("#view-collections").classList.contains("hidden") && collectionViewId === null) {
+      $("#collection-list").innerHTML = '<button type="button" class="btn">Could not load collections. Retry</button>';
+      $("#collection-list button").addEventListener("click", showCollectionList);
+    }
+    return false;
+  }
+}
+
+const collectionLabel = count => `${count} ${count === 1 ? "asset" : "assets"}`;
+
+function renderCollectionList() {
+  $("#collection-list").innerHTML = collectionCatalog.map(item => `
+    <div class="collection-tile">
+      <button type="button" class="collection-card" data-id="${item.id}">
+        <span class="n">${esc(item.name)}</span><span class="muted">${collectionLabel(item.asset_count)}</span>
+        ${item.description ? `<span class="muted">${esc(item.description)}</span>` : ""}
+      </button>
+      ${canDeleteAssets() ? `<button class="btn btn-ghost collection-delete" type="button"
+        data-id="${item.id}" aria-label="Delete collection: ${esc(item.name)}">×</button>` : ""}
+    </div>`).join("")
     || '<p class="muted">No collections yet.</p>';
-  $$("#collection-list .collection-card").forEach(card => card.addEventListener("click", () => {
-    state.collection = card.dataset.id;
-    offset = 0;
-    fromCollections = true;
-    showView("library");
+  $$(".collection-card").forEach(button => button.addEventListener("click", () => {
+    const item = collectionCatalog.find(collection => collection.id === Number(button.dataset.id));
+    if (!item) return;
+    collectionViewId = item.id;
+    collectionOffset = 0;
+    $("#collection-overview").classList.add("hidden");
+    $("#collection-members").classList.remove("hidden");
+    $("#collection-name").textContent = item.name;
+    loadCollectionAssets();
+  }));
+  $$(".collection-delete").forEach(button => button.addEventListener("click", async () => {
+    const item = collectionCatalog.find(collection => collection.id === Number(button.dataset.id));
+    if (!item || !confirm(`Delete “${item.name}”?\n\nThis deletes the collection only. Its assets stay in Library and other collections.`)) return;
+    const session = sessionVersion;
+    button.disabled = true;
+    try {
+      await api("/api/collections/" + item.id, { method: "DELETE" });
+      if (session !== sessionVersion) return;
+      const wasFiltered = state.collection === String(item.id);
+      collectionCatalog = collectionCatalog.filter(collection => collection.id !== item.id);
+      if (wasFiltered) {
+        state.collection = "";
+        offset = 0;
+      }
+      renderCollectionList();
+      refreshAssetViews({ collections: true });
+      toast(wasFiltered ? "Collection deleted. Library collection filter cleared." : "Collection deleted. Assets kept.");
+    } catch {
+      if (session === sessionVersion) toast("Could not delete collection. Try again.", "err");
+    } finally {
+      button.disabled = false;
+    }
   }));
 }
-$("#btn-new-collection").addEventListener("click", async () => {
-  const name = prompt("Collection name"); if (!name) return;
-  await api("/api/collections", { json: { name } }); loadCollections();
+
+function showCollectionList() {
+  collectionViewId = null;
+  collectionVersion++;
+  $("#collection-members").classList.add("hidden");
+  $("#collection-overview").classList.remove("hidden");
+  renderCollectionList();
+  loadCollectionCatalog();
+}
+$("#collection-back").addEventListener("click", showCollectionList);
+
+function syncCollectionPages(ready) {
+  $("#collection-prev").disabled = !ready || collectionOffset === 0;
+  $("#collection-next").disabled = !ready || collectionOffset + pageSize >= collectionTotal;
+  $("#collection-page-summary").textContent =
+    `${collectionOffset + 1}–${Math.min(collectionOffset + pageSize, collectionTotal)} of ${collectionTotal}`;
+  $("#collection-pages").classList.toggle("hidden", !ready || collectionTotal <= pageSize);
+}
+
+async function loadCollectionAssets() {
+  if (collectionViewId === null || $("#view-collections").classList.contains("hidden")) return;
+  const session = sessionVersion, version = ++collectionVersion, id = collectionViewId;
+  const status = $("#collection-status");
+  const grid = $("#collection-grid");
+  grid.replaceChildren();
+  status.textContent = "Loading assets…";
+  status.classList.remove("hidden");
+  $("#collection-count").textContent = "";
+  syncCollectionPages(false);
+  try {
+    const data = await api(`/api/assets?collection_id=${id}&limit=${pageSize}&offset=${collectionOffset}`);
+    if (session !== sessionVersion || version !== collectionVersion) return;
+    if (collectionOffset && collectionOffset >= data.total) {
+      collectionOffset = Math.max(0, Math.floor((data.total - 1) / pageSize) * pageSize);
+      loadCollectionAssets();
+      return;
+    }
+    collectionTotal = data.total;
+    $("#collection-count").textContent = collectionLabel(data.total);
+    status.textContent = canEditAssets() ? "No assets yet. Use Add assets to select items from Library." : "No assets in this collection.";
+    status.classList.toggle("hidden", data.items.length > 0);
+    renderAssetCards(grid, data.items);
+    syncCollectionPages(true);
+  } catch {
+    if (session !== sessionVersion || version !== collectionVersion) return;
+    status.innerHTML = '<p>Could not load collection assets.</p><button class="btn" type="button">Retry</button>';
+    $("button", status).addEventListener("click", loadCollectionAssets);
+  }
+}
+
+for (const [selector, step] of [["#collection-prev", -pageSize], ["#collection-next", pageSize]]) {
+  $(selector).addEventListener("click", () => { collectionOffset += step; loadCollectionAssets(); });
+}
+
+function refreshAssetViews({ tags = false, collections = false } = {}) {
+  loadLibrary();
+  loadCollectionAssets();
+  if (tags) loadFilterOptions();
+  else if (collections) loadCollectionCatalog();
+}
+
+const createCollectionDialog = $("#collection-create-dialog");
+const createCollectionName = $("#collection-new-name");
+const createCollectionError = $("#collection-create-error");
+$("#btn-new-collection").addEventListener("click", () => {
+  createCollectionName.value = "";
+  createCollectionError.textContent = "";
+  createCollectionDialog.showModal();
+  createCollectionName.focus();
+});
+$("#collection-create-cancel").addEventListener("click", () => createCollectionDialog.close());
+createCollectionDialog.addEventListener("cancel", event => {
+  if ($("button[type=submit]", createCollectionDialog).disabled) event.preventDefault();
+});
+$("#collection-create-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const name = createCollectionName.value.trim();
+  if (!name) { createCollectionError.textContent = "Enter a collection name."; return; }
+  const session = sessionVersion;
+  const buttons = $$("button", createCollectionDialog);
+  buttons.forEach(button => { button.disabled = true; });
+  createCollectionName.disabled = true;
+  createCollectionError.textContent = "";
+  try {
+    await api("/api/collections", { json: { name } });
+    if (session !== sessionVersion) return;
+    createCollectionDialog.close();
+    loadCollectionCatalog();
+    toast("Collection created");
+  } catch (error) {
+    if (session === sessionVersion) createCollectionError.textContent =
+      error.message.includes("already exists") ? "A collection with this name already exists." : "Could not create collection. Try again.";
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+    createCollectionName.disabled = false;
+  }
+});
+
+const assetPicker = $("#collection-asset-picker");
+const pickerGrid = $("#collection-picker-grid");
+const pickerStatus = $("#collection-picker-status");
+const pickerAdd = $("#collection-picker-add");
+const pickedAssets = new Set();
+let pickerOffset = 0, pickerTotal = 0, pickerVersion = 0, pickerSaving = false;
+
+function syncAssetPicker(ready) {
+  pickerAdd.disabled = pickerSaving || pickedAssets.size === 0;
+  pickerAdd.textContent = pickerSaving ? "Adding…" : pickedAssets.size ? `Add ${collectionLabel(pickedAssets.size)}` : "Add selected assets";
+  $("#collection-picker-prev").disabled = !ready || pickerSaving || pickerOffset === 0;
+  $("#collection-picker-next").disabled = !ready || pickerSaving || pickerOffset + pageSize >= pickerTotal;
+  $("#collection-picker-page").textContent = ready && pickerTotal
+    ? `${pickerOffset + 1}–${Math.min(pickerOffset + pageSize, pickerTotal)} of ${pickerTotal}` : "";
+}
+
+async function loadAssetChoices() {
+  const session = sessionVersion, version = ++pickerVersion, id = collectionViewId;
+  pickerGrid.replaceChildren();
+  pickerStatus.textContent = "Loading assets…";
+  syncAssetPicker(false);
+  try {
+    const data = await api(`/api/collections/${id}/candidates?limit=${pageSize}&offset=${pickerOffset}`);
+    if (session !== sessionVersion || version !== pickerVersion || !assetPicker.open) return;
+    if (pickerOffset && pickerOffset >= data.total) {
+      pickerOffset = Math.max(0, Math.floor((data.total - 1) / pageSize) * pageSize);
+      loadAssetChoices();
+      return;
+    }
+    pickerTotal = data.total;
+    for (const item of data.items) if (item.already_added) pickedAssets.delete(item.uuid);
+    pickerGrid.innerHTML = data.items.map(item => `<label class="picker-choice">
+      <img src="/api/assets/${item.uuid}/thumb" alt="" loading="lazy">
+      <input type="checkbox" value="${item.uuid}" ${item.already_added ? "disabled" : pickedAssets.has(item.uuid) ? "checked" : ""}>
+      <span>${esc(item.title)}</span><small class="muted">${item.already_added ? "Already added" : esc(item.media_type)}</small>
+    </label>`).join("");
+    pickerStatus.textContent = data.total ? "" : "No Library assets available.";
+    syncAssetPicker(true);
+  } catch {
+    if (session !== sessionVersion || version !== pickerVersion || !assetPicker.open) return;
+    pickerStatus.innerHTML = 'Could not load assets. <button class="btn" type="button">Retry</button>';
+    $("button", pickerStatus).addEventListener("click", loadAssetChoices);
+  }
+}
+
+$("#collection-add-assets").addEventListener("click", () => {
+  const item = collectionCatalog.find(collection => collection.id === collectionViewId);
+  if (!item) return;
+  pickedAssets.clear();
+  pickerOffset = pickerTotal = 0;
+  $("#collection-picker-title").textContent = `Add assets to ${item.name}`;
+  assetPicker.showModal();
+  loadAssetChoices();
+});
+assetPicker.addEventListener("cancel", event => { if (pickerSaving) event.preventDefault(); });
+$("#collection-picker-cancel").addEventListener("click", () => { if (!pickerSaving) assetPicker.close(); });
+pickerGrid.addEventListener("change", event => {
+  const input = event.target;
+  if (input.checked) pickedAssets.add(input.value);
+  else pickedAssets.delete(input.value);
+  syncAssetPicker(true);
+});
+for (const [selector, step] of [["#collection-picker-prev", -pageSize], ["#collection-picker-next", pageSize]]) {
+  $(selector).addEventListener("click", () => { pickerOffset += step; loadAssetChoices(); });
+}
+pickerAdd.addEventListener("click", async () => {
+  if (pickerSaving || !pickedAssets.size) return;
+  const session = sessionVersion;
+  pickerSaving = true;
+  const cancel = $("#collection-picker-cancel");
+  cancel.disabled = true;
+  const inputs = $$("input:not(:disabled)", pickerGrid);
+  inputs.forEach(input => { input.disabled = true; });
+  syncAssetPicker(false);
+  try {
+    const result = await api(`/api/collections/${collectionViewId}/assets`, { json: { uuids: [...pickedAssets] } });
+    if (session !== sessionVersion) return;
+    assetPicker.close();
+    refreshAssetViews({ collections: true });
+    toast(result.added ? `Added ${collectionLabel(result.added)}` : "Selected assets already added");
+  } catch {
+    if (session === sessionVersion) pickerStatus.textContent = "Could not add assets. Your selection is still here.";
+  } finally {
+    pickerSaving = false;
+    cancel.disabled = false;
+    inputs.forEach(input => { input.disabled = false; });
+    syncAssetPicker(true);
+  }
 });
 
 // ---------- dashboard ----------

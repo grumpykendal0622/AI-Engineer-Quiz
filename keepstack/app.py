@@ -237,7 +237,7 @@ def asset_detail(uuid: str, user: dict = Depends(require_user)):
         "WHERE asset_id = ? ORDER BY version_no DESC", (a["id"],))]
     collections = [dict(r) for r in conn.execute(
         "SELECT c.id, c.name FROM collections c JOIN collection_assets ca ON ca.collection_id = c.id "
-        "WHERE ca.asset_id = ?", (a["id"],))]
+        "WHERE ca.asset_id = ? ORDER BY c.name, c.id", (a["id"],))]
     custom = [dict(r) for r in conn.execute(
         "SELECT cf.key, cf.label, acv.value FROM asset_custom_values acv "
         "JOIN custom_fields cf ON cf.id = acv.field_id WHERE acv.asset_id = ?", (a["id"],))]
@@ -259,6 +259,14 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
         ):
             raise HTTPException(422, "Tags must be a list of non-empty names")
         desired_tags = {name.strip().lower() for name in names}
+    desired_collections = None
+    if "collection_ids" in body:
+        collection_ids = body["collection_ids"]
+        if not isinstance(collection_ids, list) or any(
+            type(collection_id) is not int or not 0 < collection_id < 2**63 for collection_id in collection_ids
+        ):
+            raise HTTPException(422, "Collection IDs must be a list of positive integers")
+        desired_collections = set(collection_ids)
     editable = {"title", "description", "alt_text", "license", "rights_statement",
                 "credit", "usage_expiry", "retention_until", "dc_creator",
                 "dc_subject", "dc_publisher", "dc_date", "status"}
@@ -267,11 +275,24 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
         if k in editable:
             sets.append(f"{k} = ?")
             vals.append(v)
-    if sets or desired_tags is not None:
+    reindex = bool(sets) or desired_tags is not None
+    if reindex or desired_collections is not None:
         sets.append("updated_at = ?")
         vals.extend([now_iso(), a["id"]])
         with transaction() as conn:
             conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE id = ?", vals)
+            if desired_collections is not None:
+                if not conn.execute("SELECT 1 FROM assets WHERE id = ? AND status = 'active'", (a["id"],)).fetchone():
+                    raise HTTPException(409, "Only active assets can be assigned to a collection")
+                if any(conn.execute("SELECT 1 FROM collections WHERE id = ?", (collection_id,)).fetchone() is None
+                       for collection_id in desired_collections):
+                    raise HTTPException(409, "One of the selected collections no longer exists")
+                current_collections = {row["collection_id"] for row in conn.execute(
+                    "SELECT collection_id FROM collection_assets WHERE asset_id = ?", (a["id"],))}
+                conn.executemany("DELETE FROM collection_assets WHERE asset_id = ? AND collection_id = ?",
+                                 ((a["id"], collection_id) for collection_id in current_collections - desired_collections))
+                conn.executemany("INSERT INTO collection_assets (asset_id, collection_id, added_at) VALUES (?,?,?)",
+                                 ((a["id"], collection_id, now_iso()) for collection_id in desired_collections - current_collections))
             if desired_tags is not None:
                 current_tags = {row["name"]: row["id"] for row in conn.execute(
                     "SELECT t.id, t.name FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
@@ -282,8 +303,10 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
                     conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
                     conn.execute("INSERT INTO asset_tags (asset_id, tag_id, source) "
                                  "SELECT ?, id, 'manual' FROM tags WHERE name = ?", (a["id"], name))
-            ingest.reindex_fts(a["id"], conn)
-        ingest.reindex_embedding(a["id"])
+            if reindex:
+                ingest.reindex_fts(a["id"], conn)
+        if reindex:
+            ingest.reindex_embedding(a["id"])
         log("asset.update", user=user, target_type="asset", target_id=uuid,
             detail=",".join(body.keys()), ip=client_ip(request))
     return asset_detail(uuid, user)
@@ -419,8 +442,9 @@ def list_tags(user: dict = Depends(require_user)):
 @app.get("/api/collections")
 def list_collections(user: dict = Depends(require_user)):
     rows = get_conn().execute(
-        "SELECT c.*, (SELECT COUNT(*) FROM collection_assets ca WHERE ca.collection_id = c.id) AS asset_count "
-        "FROM collections c ORDER BY c.name").fetchall()
+        "SELECT c.*, (SELECT COUNT(*) FROM collection_assets ca JOIN assets a ON a.id = ca.asset_id "
+        "WHERE ca.collection_id = c.id AND a.status = 'active') AS asset_count "
+        "FROM collections c ORDER BY c.name, c.id").fetchall()
     return {"collections": [dict(r) for r in rows]}
 
 
@@ -428,16 +452,19 @@ def list_collections(user: dict = Depends(require_user)):
 def create_collection(request: Request, body: dict = Body(...),
                       user: dict = Depends(require_role("contributor"))):
     import uuid as uuidlib
-    name = (body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "Name required")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+        raise HTTPException(422, "Enter a collection name of 1–80 characters")
+    name = name.strip()
     cid = str(uuidlib.uuid4())
     with transaction() as conn:
         cur = conn.execute(
             "INSERT INTO collections (uuid, name, description, parent_id, kind, created_by, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM collections WHERE name = ? COLLATE NOCASE)",
             (cid, name, body.get("description"), body.get("parent_id"),
-             body.get("kind", "folder"), user["id"], now_iso()))
+             body.get("kind", "folder"), user["id"], now_iso(), name))
+        if not cur.rowcount:
+            raise HTTPException(409, "A collection with this name already exists")
     log("collection.create", user=user, target_type="collection", target_id=cid, detail=name)
     return {"id": cur.lastrowid, "uuid": cid, "name": name}
 
@@ -445,26 +472,51 @@ def create_collection(request: Request, body: dict = Body(...),
 @app.delete("/api/collections/{cid}")
 def delete_collection(cid: int, user: dict = Depends(require_role("editor"))):
     with transaction() as conn:
-        conn.execute("DELETE FROM collections WHERE id = ?", (cid,))
+        conn.execute("UPDATE collections SET parent_id = NULL WHERE parent_id = ?", (cid,))
+        if not conn.execute("DELETE FROM collections WHERE id = ?", (cid,)).rowcount:
+            raise HTTPException(404, "Collection not found")
     log("collection.delete", user=user, target_type="collection", target_id=cid)
     return {"ok": True}
+
+
+@app.get("/api/collections/{cid}/candidates")
+def collection_candidates(cid: int, limit: int = Query(12, ge=1, le=200),
+                          offset: int = Query(0, ge=0, le=2**63 - 1),
+                          user: dict = Depends(require_role("contributor"))):
+    conn = get_conn()
+    if not conn.execute("SELECT 1 FROM collections WHERE id = ?", (cid,)).fetchone():
+        raise HTTPException(404, "Collection not found")
+    results = search.search(limit=limit, offset=offset)
+    ids = [item["id"] for item in results["items"]]
+    if ids:
+        placeholders = ", ".join("?" for asset_id in ids)
+        assigned = {row["asset_id"] for row in conn.execute(
+            f"SELECT asset_id FROM collection_assets WHERE collection_id = ? AND asset_id IN ({placeholders})",
+            (cid, *ids))}
+        for item in results["items"]:
+            item["already_added"] = item["id"] in assigned
+    return {"total": results["total"], "items": results["items"]}
 
 
 @app.post("/api/collections/{cid}/assets")
 def add_to_collection(cid: int, body: dict = Body(...),
                       user: dict = Depends(require_role("contributor"))):
-    uuids = body.get("uuids", [])
-    conn = get_conn()
+    uuids = body.get("uuids")
+    if not isinstance(uuids, list) or any(not isinstance(uuid, str) or not uuid for uuid in uuids):
+        raise HTTPException(422, "Asset UUIDs must be a list of non-empty strings")
     added = 0
     with transaction() as conn:
-        for u in uuids:
-            row = conn.execute("SELECT id FROM assets WHERE uuid = ?", (u,)).fetchone()
-            if row:
-                conn.execute(
-                    "INSERT OR IGNORE INTO collection_assets (collection_id, asset_id, added_at) VALUES (?,?,?)",
-                    (cid, row["id"], now_iso()))
-                added += 1
-    log("collection.add", user=user, target_type="collection", target_id=cid, detail=f"{added} assets")
+        if not conn.execute("SELECT 1 FROM collections WHERE id = ?", (cid,)).fetchone():
+            raise HTTPException(404, "Collection not found")
+        for uuid in dict.fromkeys(uuids):
+            row = conn.execute("SELECT id FROM assets WHERE uuid = ? AND status = 'active'", (uuid,)).fetchone()
+            if row is None:
+                raise HTTPException(409, "One of the selected assets is no longer available")
+            added += conn.execute(
+                "INSERT OR IGNORE INTO collection_assets (collection_id, asset_id, added_at) VALUES (?,?,?)",
+                (cid, row["id"], now_iso())).rowcount
+    if added:
+        log("collection.add", user=user, target_type="collection", target_id=cid, detail=f"{added} assets")
     return {"ok": True, "added": added}
 
 
