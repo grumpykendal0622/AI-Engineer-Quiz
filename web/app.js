@@ -436,8 +436,9 @@ async function loadLibrary() {
 function renderGrid(items, total) {
   $("#result-title").textContent = state.q.trim() ? `Results (${total})` : `Library (${total})`;
   const conflict = state.includeTags.find(name => state.excludeTags.includes(name));
+  const emptyLibraryMessage = canEditAssets() ? "No assets yet. Click Upload to get started." : "No assets are available yet.";
   $("#empty").textContent = conflict ? `“${conflict}” is both included and excluded. Remove one condition.`
-    : $("#active-filters").childElementCount ? "No assets match these filters. Try removing a condition." : "No assets yet. Click Upload to get started.";
+    : $("#active-filters").childElementCount ? "No assets match these filters. Try removing a condition." : emptyLibraryMessage;
   $("#empty").classList.toggle("hidden", items.length > 0);
   renderAssetCards($("#grid"), items);
 }
