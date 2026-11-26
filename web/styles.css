@@ -189,6 +189,11 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .field-row .k { color: var(--muted); font-size: 13px; }
 .field-row .v { word-break: break-word; }
 .edit-grid { display: flex; flex-direction: column; gap: var(--s2); }
+#asset-edit fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+#asset-edit legend { margin-bottom: var(--s2); padding: 0; font-weight: 600; }
+#asset-edit button:disabled { opacity: .55; cursor: default; }
+.edit-tags { margin-top: var(--s3); }
+.edit-tag-help { margin: var(--s1) 0 var(--s2); font-size: 13px; }
 .edit-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
 .edit-grid input, .edit-grid textarea {
   background: var(--base-0); border: 1px solid var(--base-3); color: var(--text);
@@ -200,7 +205,7 @@ button, input, select { font-family: inherit; font-size: inherit; }
   border: 1px solid var(--base-3); border-radius: 999px; padding: 4px var(--s2); font-size: 13px;
 }
 .tag.ai { border-color: var(--accent); color: var(--accent); }
-.tag .rm { cursor: pointer; color: var(--muted); }
+.tag .rm { font: inherit; border: 0; background: none; cursor: pointer; color: var(--muted); padding: 0 3px; }
 .tag-add { background: var(--base-0); border: 1px dashed var(--base-3); border-radius: 999px; padding: 4px var(--s2); color: var(--text); width: 120px; }
 .similar-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s2); }
 .similar-strip img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-sm); cursor: pointer; border: 1px solid var(--base-3); }

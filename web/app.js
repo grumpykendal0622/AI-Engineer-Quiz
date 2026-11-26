@@ -60,7 +60,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     state.user = r.user; enterApp();
   } catch { $("#login-error").textContent = "Invalid credentials"; $("#login-error").classList.remove("hidden"); }
 });
-$("#btn-logout").addEventListener("click", logout);
+$("#btn-logout").addEventListener("click", () => { if (canLeaveAsset()) logout(); });
 function logout() {
   sessionVersion++;
   localStorage.removeItem("keepstack_token");
@@ -71,7 +71,7 @@ function logout() {
   libraryReady = false;
   exporting = false;
   syncPages();
-  closeDrawer();
+  resetDrawer();
   $("#upload-modal").classList.add("hidden");
   $("#toast").classList.add("hidden");
   $("#search").value = "";
@@ -368,27 +368,46 @@ function renderGrid(items, total) {
 
 // ---------- asset detail drawer ----------
 const drawer = $("#drawer");
+let drawerVersion = 0;
+let canLeaveAsset = () => true;
 $("#drawer-close").addEventListener("click", closeDrawer);
 $(".drawer-backdrop").addEventListener("click", closeDrawer);
-function closeDrawer() { drawer.classList.add("hidden"); document.body.classList.remove("modal-open"); }
+function closeDrawer() {
+  if (canLeaveAsset()) resetDrawer();
+}
+
+function resetDrawer() {
+  drawerVersion++;
+  canLeaveAsset = () => true;
+  drawer.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
+function dublinCoreRows(dc) {
+  return Object.entries(dc || {}).filter(([, value]) => value).map(([key, value]) =>
+    `<div class="field-row"><span class="k">${esc(key)}</span><span class="v">${esc(value)}</span></div>`).join("");
+}
 
 async function openAsset(uuid) {
+  if (!canLeaveAsset()) return;
+  canLeaveAsset = () => true;
+  const version = ++drawerVersion;
   const session = sessionVersion;
   drawer.classList.remove("hidden");
   document.body.classList.add("modal-open");
+  $(".drawer-panel").scrollTop = 0;
   $("#drawer-body").innerHTML = '<p class="muted">Loading...</p>';
   const [d, meta, sim] = await Promise.all([
     api("/api/assets/" + uuid),
     api("/api/assets/" + uuid + "/metadata"),
     api("/api/assets/" + uuid + "/similar"),
   ]);
-  if (session !== sessionVersion) return;
+  if (session !== sessionVersion || version !== drawerVersion) return;
   const a = d.asset;
   const canEdit = ["admin","editor","contributor"].includes(state.user.role);
   const preview = a.media_type === "image"
     ? `<img class="detail-preview" src="/api/assets/${uuid}/preview" alt="${esc(a.alt_text||a.title)}">`
     : `<img class="detail-preview" src="/api/assets/${uuid}/thumb" alt="${esc(a.title)}">`;
-  const dc = a.dublin_core || {};
   $("#drawer-body").innerHTML = `
     ${preview}
     <h2 class="detail-title">${esc(a.title)}</h2>
@@ -399,7 +418,8 @@ async function openAsset(uuid) {
       ${["admin","editor"].includes(state.user.role)?`<button class="btn btn-danger" id="d-delete">Delete</button>`:""}
     </div>
 
-    ${canEdit ? `<div class="detail-section"><h4>Edit metadata</h4>
+    ${canEdit ? `<form class="detail-section" id="asset-edit"><fieldset>
+      <legend>Edit metadata &amp; tags</legend>
       <div class="edit-grid">
         <label>Title<input id="e-title" value="${esc(a.title)}"></label>
         <label>Description<textarea id="e-description" rows="2">${esc(a.description)}</textarea></label>
@@ -408,19 +428,24 @@ async function openAsset(uuid) {
         <label>Rights / license<input id="e-rights_statement" value="${esc(a.rights_statement)}"></label>
         <label>Retention until<input id="e-retention_until" type="date" value="${esc((a.retention_until||'').slice(0,10))}"></label>
       </div>
-      <div class="btn-row"><button class="btn btn-primary" id="d-save">Save changes</button></div></div>` : ""}
-
-    <div class="detail-section"><h4>Tags</h4>
-      <div class="tag-row" id="tag-row">
-        ${d.tags.map(t => `<span class="tag ${t.source==='ai'?'ai':''}">${esc(t.name)}${canEdit?`<span class="rm" data-tag="${esc(t.name)}">&times;</span>`:""}</span>`).join("")}
-        ${canEdit?`<input class="tag-add" id="tag-add" placeholder="+ add tag">`:""}
-      </div></div>
+      <div class="edit-tags">
+        <h4>Tags</h4>
+        <div class="tag-row" id="tag-row"></div>
+        <div class="btn-row">
+          <input class="tag-add" id="tag-add" aria-label="New tag" placeholder="Enter a tag" autocomplete="off">
+          <button class="btn" id="tag-stage" type="button">Add tag</button>
+        </div>
+        <p class="muted edit-tag-help">Tag changes apply when you save.</p>
+      </div>
+      <div class="btn-row"><button class="btn btn-primary" id="d-save" type="submit" disabled>Save changes</button>
+        <span id="edit-message" role="status"></span></div>
+    </fieldset></form>` : `<div class="detail-section"><h4>Tags</h4><div class="tag-row" id="tag-row"></div></div>`}
 
     ${sim.items.length?`<div class="detail-section"><h4>Similar assets</h4>
       <div class="similar-strip">${sim.items.slice(0,8).map(s=>`<img src="/api/assets/${s.uuid}/thumb" data-uuid="${s.uuid}" title="${esc(s.title)}">`).join("")}</div></div>`:""}
 
     <div class="detail-section"><h4>Dublin Core</h4>
-      ${Object.entries(dc).filter(([,v])=>v).map(([k,v])=>`<div class="field-row"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join("")}
+      <div id="dublin-core-values">${dublinCoreRows(a.dublin_core)}</div>
       <div class="btn-row"><a class="btn btn-ghost" href="/oai?verb=GetRecord&metadataPrefix=oai_dc&identifier=oai::${a.uuid}" target="_blank">View OAI-PMH XML</a></div>
     </div>
 
@@ -446,39 +471,122 @@ async function openAsset(uuid) {
   });
   $$("#drawer-body .similar-strip img").forEach(img => img.addEventListener("click", () => openAsset(img.dataset.uuid)));
   if (canEdit) {
-    $("#d-save")?.addEventListener("click", async () => {
-      const body = {};
-      ["title","description","alt_text","dc_creator","rights_statement","retention_until"].forEach(f => { const el = $("#e-"+f); if (el) body[f] = el.value; });
-      await api("/api/assets/"+uuid, { method: "PATCH", json: body });
-      toast("Saved"); openAsset(uuid); loadLibrary();
-    });
-    $("#tag-add")?.addEventListener("keydown", async (e) => {
-      if (e.key === "Enter" && e.target.value.trim()) {
-        await api("/api/assets/"+uuid+"/tags", { json: { name: e.target.value.trim() } });
-        if (session !== sessionVersion) return;
-        openAsset(uuid);
-        loadLibrary();
-        loadFilterOptions();
-      }
-    });
-    $$("#tag-row .rm").forEach(rm => rm.addEventListener("click", async () => {
-      await api("/api/assets/"+uuid+"/tags/"+encodeURIComponent(rm.dataset.tag), { method: "DELETE" });
-      if (session !== sessionVersion) return;
-      openAsset(uuid);
-      loadLibrary();
-      loadFilterOptions();
-    }));
+    bindAssetEditor(uuid, d.tags);
     $("#d-share")?.addEventListener("click", async () => {
       const r = await api("/api/shares", { json: { target_type: "asset", target_id: a.id, permission: "download" } });
       await navigator.clipboard?.writeText(r.url).catch(()=>{});
       toast("Share link copied: " + r.url);
     });
-  }
+  } else renderDetailTags(d.tags);
   $("#d-delete")?.addEventListener("click", async () => {
+    if ($("#asset-edit fieldset")?.disabled) return;
     if (!confirm("Delete this asset?")) return;
     await api("/api/assets/"+uuid, { method: "DELETE" });
-    toast("Deleted"); closeDrawer(); loadLibrary();
+    if (session !== sessionVersion) return;
+    toast("Deleted");
+    if (version === drawerVersion) resetDrawer();
+    loadLibrary();
   });
+}
+
+function renderDetailTags(tags, removeTag) {
+  const row = $("#tag-row");
+  row.replaceChildren();
+  if (!tags.length) row.textContent = "No tags";
+  for (const tag of tags) {
+    const chip = document.createElement("span");
+    chip.className = tag.source === "ai" ? "tag ai" : "tag";
+    chip.textContent = tag.name;
+    if (removeTag) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "rm";
+      remove.dataset.tag = tag.name;
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", "Remove tag: " + tag.name);
+      remove.addEventListener("click", () => removeTag(tag.name));
+      chip.append(remove);
+    }
+    row.append(chip);
+  }
+}
+
+function bindAssetEditor(uuid, tags) {
+  const form = $("#asset-edit");
+  const fieldset = $("fieldset", form);
+  const input = $("#tag-add");
+  const save = $("#d-save");
+  const add = $("#tag-stage");
+  const message = $("#edit-message");
+  const fields = ["title", "description", "alt_text", "dc_creator", "rights_statement", "retention_until"];
+  const readFields = () => Object.fromEntries(fields.map(name => [name, $("#e-" + name, form).value]));
+  const names = () => tags.map(tag => tag.name).sort();
+  let savedFields = readFields(), savedNames = names(), savedTags = tags;
+  const tagsChanged = () => JSON.stringify(names()) !== JSON.stringify(savedNames);
+  const dirty = () => Boolean(input.value.trim()) || tagsChanged()
+    || fields.some(name => $("#e-" + name, form).value !== savedFields[name]);
+  canLeaveAsset = () => !fieldset.disabled && (!dirty() || confirm("Discard unsaved changes?"));
+  const sync = () => { save.disabled = fieldset.disabled || !dirty(); add.disabled = !input.value.trim(); };
+  const renderTags = () => renderDetailTags(tags, name => {
+    tags = tags.filter(tag => tag.name !== name);
+    renderTags();
+    input.focus({ preventScroll: true });
+    sync();
+  });
+  const stageTag = () => {
+    const name = input.value.trim().toLowerCase();
+    if (!name) return;
+    if (!tags.some(tag => tag.name === name)) {
+      tags = [...tags, savedTags.find(tag => tag.name === name) || { name, source: "manual" }];
+      renderTags();
+    }
+    input.value = "";
+    sync();
+  };
+  add.addEventListener("click", () => { stageTag(); input.focus({ preventScroll: true }); });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      stageTag();
+    }
+  });
+  form.addEventListener("input", () => { message.textContent = ""; sync(); });
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (fieldset.disabled) return;
+    stageTag();
+    if (!dirty()) return;
+    const values = readFields();
+    const body = Object.fromEntries(fields.filter(name => values[name] !== savedFields[name])
+      .map(name => [name, values[name]]));
+    const changedTags = tagsChanged();
+    if (changedTags) body.tags = names();
+    fieldset.disabled = true;
+    message.textContent = "Saving…";
+    message.className = "muted";
+    try {
+      const updated = await api("/api/assets/" + uuid, { method: "PATCH", json: body });
+      if (!form.isConnected) return;
+      savedFields = values;
+      tags = savedTags = updated.tags;
+      savedNames = names();
+      message.textContent = "Saved";
+      $(".detail-title").textContent = updated.asset.title;
+      $(".detail-preview").alt = updated.asset.alt_text || updated.asset.title;
+      $("#dublin-core-values").innerHTML = dublinCoreRows(updated.asset.dublin_core);
+      renderTags();
+      loadLibrary();
+      if (changedTags) loadFilterOptions();
+    } catch {
+      message.className = "error";
+      message.textContent = "Could not save. Your changes are still here.";
+    } finally {
+      fieldset.disabled = false;
+      sync();
+    }
+  });
+  renderTags();
+  sync();
 }
 
 // ---------- upload ----------

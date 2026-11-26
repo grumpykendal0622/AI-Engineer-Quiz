@@ -275,6 +275,66 @@ def test_edits_change_query_and_csv(library_client, harbor_demo, harbor_filters)
         library_client.delete(path + "/tags/internal")
 
 
+def test_combined_edit_preserves_tag_sources_and_refreshes_search_and_csv(library_client, harbor_demo):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 02"]
+    path = f"/api/assets/{asset['uuid']}"
+    original = library_client.get(path).json()
+    original_tags = [tag["name"] for tag in original["tags"]]
+    original_campaign = next(tag for tag in original["tags"] if tag["name"] == "campaign")
+    special = 'team/brand, "中文" #100%'
+
+    try:
+        updated = library_client.patch(path, json={
+            "title": "Combined edit",
+            "description": "Atomic draft detail",
+            "tags": ["campaign", " " + special.upper() + " ", special],
+        })
+        assert updated.status_code == 200
+        assert updated.json()["tags"] == [original_campaign, {"name": special, "source": "manual", "confidence": None}]
+        query = {"include_tag": special, "q": "atomic draft"}
+        listing = library_client.get("/api/assets", params=query).json()
+        assert [item["uuid"] for item in listing["items"]] == [asset["uuid"]]
+        row, = read_export(library_client.get("/api/assets/export.csv", params=query))
+        assert row["title"] == "Combined edit"
+        assert json.loads(row["tags"]) == ["campaign", special]
+
+        assert library_client.patch(path, json={"tags": ["campaign"]}).status_code == 200
+        assert library_client.get("/api/assets", params=query).json()["total"] == 0
+        assert read_export(library_client.get("/api/assets/export.csv", params=query)) == []
+        assert library_client.patch(path, json={"tags": []}).json()["tags"] == []
+    finally:
+        library_client.patch(path, json={"title": asset["title"], "description": asset["description"],
+                                         "tags": original_tags})
+
+
+def test_combined_edit_rejects_invalid_tags_and_rolls_back_on_index_failure(
+    library_client, harbor_demo, monkeypatch,
+):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 03"]
+    path = f"/api/assets/{asset['uuid']}"
+    original = library_client.get(path).json()
+    for tags in ("not-a-list", [None], ["  "], ["null\x00byte"]):
+        response = library_client.patch(path, json={"title": "Should not persist", "tags": tags})
+        assert response.status_code == 422
+
+    reindex_fts = ingest.reindex_fts
+
+    def failing_index(asset_id, conn):
+        reindex_fts(asset_id, conn)
+        raise RuntimeError("Index interrupted")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ingest, "reindex_fts", failing_index)
+        with pytest.raises(RuntimeError, match="Index interrupted"):
+            library_client.patch(path, json={"title": "Should not persist", "tags": ["rollback-only"]})
+    current = library_client.get(path).json()
+    assert current["asset"]["title"] == original["asset"]["title"]
+    assert current["tags"] == original["tags"]
+    assert library_client.get("/api/assets", params={"q": "should not persist"}).json()["total"] == 0
+
+
 def test_semantic_search_returns_ranked_results():
     ingest.ingest_stream(io.BytesIO(_img_bytes(color=(40, 150, 90), size=(330, 500))),
                          "mountain_trail.jpg", title="Mountain trail in the alpine forest")

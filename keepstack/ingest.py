@@ -10,6 +10,7 @@ here, once, at upload time.
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid as uuidlib
 from typing import BinaryIO, Optional
 
@@ -32,9 +33,12 @@ def _set_tags(conn, asset_id: int, tags: list[tuple[str, float]], source: str) -
         )
 
 
-def reindex_fts(asset_id: int) -> None:
-    """Rebuild the FTS row for an asset from its current state."""
-    conn = get_conn()
+def reindex_fts(asset_id: int, conn: sqlite3.Connection | None = None) -> None:
+    """Rebuild the FTS row, joining the caller's transaction when provided."""
+    if conn is None:
+        with transaction() as conn:
+            reindex_fts(asset_id, conn)
+        return
     a = conn.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
     if not a:
         return
@@ -61,7 +65,6 @@ def reindex_fts(asset_id: int) -> None:
             a["filename"] or "", " ".join(tags), meta_text, " ".join(custom),
         ),
     )
-    conn.commit()
 
 
 def reindex_embedding(asset_id: int) -> None:
