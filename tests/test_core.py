@@ -3,6 +3,7 @@
 These run against a throwaway data directory so they never touch a real
 repository. Run with:  python -m pytest -q
 """
+import csv
 import io
 import json
 import os
@@ -107,6 +108,463 @@ def test_keyword_search_finds_by_title():
     res = search.search(q="harbor")
     assert res["total"] >= 1
     assert any("harbor" in (i["title"] or "").lower() for i in res["items"])
+
+
+def test_library_filters_bind_join_values_before_where_values():
+    asset = ingest.ingest_stream(io.BytesIO(_img_bytes(color=(65, 130, 170))),
+                                 "catalog_card.jpg", title="Waterside catalog card")
+    conn = get_conn()
+    collection_id = conn.execute(
+        "INSERT INTO collections (uuid, name, created_at) VALUES (?,?,?)",
+        (asset["uuid"], "Catalog", asset["created_at"]),
+    ).lastrowid
+    conn.execute("INSERT INTO collection_assets (collection_id, asset_id, added_at) VALUES (?,?,?)",
+                 (collection_id, asset["id"], asset["created_at"]))
+    tag_id = conn.execute("INSERT INTO tags (name) VALUES (?)", ("catalog-card",)).lastrowid
+    conn.execute("INSERT INTO asset_tags (asset_id, tag_id, source) VALUES (?,?,'manual')",
+                 (asset["id"], tag_id))
+    conn.commit()
+
+    for filters in ({"collection_id": collection_id},
+                    {"tag": "CATALOG-CARD"},
+                    {"collection_id": collection_id, "tag": "catalog-card", "q": "waterside", "media_type": "image"}):
+        result = search.search(**filters)
+        assert result["total"] == 1, filters
+        assert [item["uuid"] for item in result["items"]] == [asset["uuid"]], filters
+
+
+@pytest.fixture(scope="module")
+def harbor_demo():
+    from keepstack.seed_search import seed_search_demo
+
+    return seed_search_demo()
+
+
+@pytest.fixture
+def harbor_filters(harbor_demo):
+    collection_id, _ = harbor_demo
+    return {"q": "harbor", "collection_id": collection_id, "media_type": "image",
+            "include_tag": ["Approved", "campaign", "approved"],
+            "exclude_tag": ["internal", "restricted"]}
+
+
+def test_combined_library_filters(harbor_demo, harbor_filters):
+    _, assets = harbor_demo
+    expected = {assets[f"Harbor view {number:02}"]["uuid"] for number in range(1, 16)}
+
+    def matches(**changes):
+        result = search.search(**{**harbor_filters, **changes})
+        assert result["total"] == len(result["items"])
+        return {item["uuid"] for item in result["items"]}
+
+    assert matches() == expected
+    assert matches(q="  ") == expected | {assets["River estuary"]["uuid"]}
+    assert matches(collection_id=None) == expected | {assets["Harbor outside collection"]["uuid"]}
+    assert matches(media_type=None) == expected | {assets["Harbor brief"]["uuid"]}
+    assert matches(exclude_tag=["internal"]) == expected | {assets["Harbor restricted"]["uuid"]}
+    assert matches(include_tag=["approved", "camp"]) == {assets["Harbor short tag"]["uuid"]}
+    assert matches(exclude_tag=["APPROVED"]) == set()
+    assert matches(q='"*%(') == set()
+
+
+@pytest.mark.parametrize("direction", ["oldest", "newest"])
+def test_keyword_sort_and_stable_pages(harbor_demo, harbor_filters, direction):
+    _, assets = harbor_demo
+    expected = sorted((assets[f"Harbor view {number:02}"] for number in range(1, 16)),
+                      key=lambda asset: (asset["created_at"], asset["id"]), reverse=direction == "newest")
+    actual = []
+    for offset in range(0, 15, 5):
+        page = search.search(**harbor_filters, sort=direction, limit=5, offset=offset)
+        assert page["total"] == 15
+        actual.extend(item["uuid"] for item in page["items"])
+    assert actual == [asset["uuid"] for asset in expected]
+
+
+@pytest.fixture
+def library_client():
+    from fastapi.testclient import TestClient
+    from keepstack.app import app
+
+    with TestClient(app) as client:
+        response = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
+        assert response.status_code == 200
+        client.headers["Authorization"] = "Bearer " + response.json()["token"]
+        yield client
+
+
+def test_library_validates_pagination_and_ft_input(library_client):
+    for params in ({"limit": "-1"}, {"limit": "0"}, {"limit": "201"}, {"limit": "bad"},
+                   {"offset": "-1"}, {"offset": "bad"}, {"offset": str(2**80)}):
+        assert library_client.get("/api/assets", params=params).status_code == 422
+    for query in ('"*%(', "«harbor» -'%' (", "中文"):
+        assert library_client.get("/api/assets", params={"q": query, "limit": 1}).status_code == 200
+
+
+CSV_FIELDS = ["uuid", "title", "description", "filename", "media_type", "tags", "created_at"]
+
+
+def read_export(response):
+    assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    reader = csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"), newline=""))
+    assert reader.fieldnames == CSV_FIELDS
+    return list(reader)
+
+
+@pytest.mark.parametrize("direction", ["oldest", "newest"])
+def test_csv_matches_all_list_pages(library_client, harbor_filters, direction):
+    params = {**harbor_filters, "sort": direction, "limit": 5}
+    expected = []
+    for offset in (0, 5, 10):
+        listing = library_client.get("/api/assets", params={**params, "offset": offset})
+        assert listing.status_code == 200
+        assert listing.json()["total"] == 15
+        expected.extend(item["uuid"] for item in listing.json()["items"])
+    export = library_client.get("/api/assets/export.csv", params={**params, "offset": 10})
+    assert export.headers["content-disposition"] == 'attachment; filename="keepstack-assets.csv"'
+    rows = read_export(export)
+    assert [row["uuid"] for row in rows] == expected
+    assert all(row["media_type"] == "image" and json.loads(row["tags"]) == ["approved", "campaign"]
+               for row in rows)
+
+
+def test_csv_requires_login_and_keeps_header_for_empty_results(library_client, harbor_filters):
+    path = "/api/assets/export.csv"
+    assert library_client.get(path, headers={"Authorization": ""}).status_code == 401
+    response = library_client.get(path, params={**harbor_filters, "exclude_tag": ["approved"]})
+    assert read_export(response) == []
+
+
+def test_edits_change_query_and_csv(library_client, harbor_demo, harbor_filters):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 01"]
+    uuid = asset["uuid"]
+    path = f"/api/assets/{uuid}"
+    title = '港口, "图库"\n新标题'
+    description = '说明, "备注"\n新内容'
+
+    def assert_uuids(params, expected):
+        listing = library_client.get("/api/assets", params=params)
+        assert listing.status_code == 200
+        assert [item["uuid"] for item in listing.json()["items"]] == expected
+        rows = read_export(library_client.get("/api/assets/export.csv", params=params))
+        assert [row["uuid"] for row in rows] == expected
+        return rows
+
+    try:
+        old_marker = "archivebeforeonly"
+        assert library_client.patch(path, json={"title": asset["title"] + " " + old_marker}).status_code == 200
+        assert_uuids({**harbor_filters, "q": old_marker}, [uuid])
+        assert library_client.patch(path, json={"title": title, "description": description}).status_code == 200
+        assert_uuids({**harbor_filters, "q": old_marker}, [])
+        edited = {**harbor_filters, "q": "港口"}
+        row, = assert_uuids(edited, [uuid])
+        assert (row["title"], row["description"], row["filename"]) == (title, description, asset["filename"])
+        assert_uuids({**edited, "q": "新内容"}, [uuid])
+        assert library_client.delete(path + "/tags/approved").status_code == 200
+        assert_uuids(edited, [])
+        assert library_client.post(path + "/tags", json={"name": "Approved"}).status_code == 200
+        assert_uuids(edited, [uuid])
+        assert library_client.post(path + "/tags", json={"name": "internal"}).status_code == 200
+        assert_uuids(edited, [])
+        assert library_client.delete(path + "/tags/internal").status_code == 200
+        assert json.loads(assert_uuids(edited, [uuid])[0]["tags"]) == ["approved", "campaign"]
+    finally:
+        library_client.patch(path, json={"title": asset["title"], "description": asset["description"] or ""})
+        library_client.post(path + "/tags", json={"name": "approved"})
+        library_client.delete(path + "/tags/internal")
+
+
+def test_combined_edit_preserves_tag_sources_and_refreshes_search_and_csv(library_client, harbor_demo):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 02"]
+    path = f"/api/assets/{asset['uuid']}"
+    original = library_client.get(path).json()
+    original_tags = [tag["name"] for tag in original["tags"]]
+    original_campaign = next(tag for tag in original["tags"] if tag["name"] == "campaign")
+    special = 'team/brand, "中文" #100%'
+
+    try:
+        updated = library_client.patch(path, json={
+            "title": "Combined edit",
+            "description": "Atomic draft detail",
+            "tags": ["campaign", " " + special.upper() + " ", special],
+        })
+        assert updated.status_code == 200
+        assert updated.json()["tags"] == [original_campaign, {"name": special, "source": "manual", "confidence": None}]
+        query = {"include_tag": special, "q": "atomic draft"}
+        listing = library_client.get("/api/assets", params=query).json()
+        assert [item["uuid"] for item in listing["items"]] == [asset["uuid"]]
+        row, = read_export(library_client.get("/api/assets/export.csv", params=query))
+        assert row["title"] == "Combined edit"
+        assert json.loads(row["tags"]) == ["campaign", special]
+
+        assert library_client.patch(path, json={"tags": ["campaign"]}).status_code == 200
+        assert library_client.get("/api/assets", params=query).json()["total"] == 0
+        assert read_export(library_client.get("/api/assets/export.csv", params=query)) == []
+        assert library_client.patch(path, json={"tags": []}).json()["tags"] == []
+    finally:
+        library_client.patch(path, json={"title": asset["title"], "description": asset["description"],
+                                         "tags": original_tags})
+
+
+def test_combined_edit_rejects_invalid_tags_and_rolls_back_on_index_failure(
+    library_client, harbor_demo, monkeypatch,
+):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 03"]
+    path = f"/api/assets/{asset['uuid']}"
+    original = library_client.get(path).json()
+    for tags in ("not-a-list", [None], ["  "], ["null\x00byte"]):
+        response = library_client.patch(path, json={"title": "Should not persist", "tags": tags})
+        assert response.status_code == 422
+
+    reindex_fts = ingest.reindex_fts
+
+    def failing_index(asset_id, conn):
+        reindex_fts(asset_id, conn)
+        raise RuntimeError("Index interrupted")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ingest, "reindex_fts", failing_index)
+        with pytest.raises(RuntimeError, match="Index interrupted"):
+            library_client.patch(path, json={"title": "Should not persist", "tags": ["rollback-only"]})
+    current = library_client.get(path).json()
+    assert current["asset"]["title"] == original["asset"]["title"]
+    assert current["tags"] == original["tags"]
+    assert library_client.get("/api/assets", params={"q": "should not persist"}).json()["total"] == 0
+
+
+def test_collection_bulk_add_and_delete_keep_originals(library_client, harbor_demo):
+    original_collection, assets = harbor_demo
+    first = assets["Harbor view 01"]["uuid"]
+    second = assets["Harbor view 02"]["uuid"]
+    deleted = assets["Harbor deleted"]["uuid"]
+    response = library_client.post("/api/collections", json={"name": "Bulk test"})
+    assert response.status_code == 200
+    collection_id = response.json()["id"]
+    endpoint = f"/api/collections/{collection_id}"
+
+    def members():
+        return library_client.get("/api/assets", params={"collection_id": collection_id}).json()["items"]
+
+    try:
+        assert members() == []
+        assert library_client.post("/api/collections", json={"name": "  BULK test "}).status_code == 409
+        assert library_client.post(endpoint + "/assets", json={"uuids": [first, deleted]}).status_code == 409
+        assert members() == []
+        assert library_client.post(endpoint + "/assets", json={"uuids": [first, second, first]}).json()["added"] == 2
+        assert library_client.post(endpoint + "/assets", json={"uuids": [first, second]}).json()["added"] == 0
+        assert {item["uuid"] for item in members()} == {first, second}
+        assert library_client.get(endpoint + "/candidates", params={"limit": 0}).status_code == 422
+        candidates = library_client.get(endpoint + "/candidates", params={"limit": 200}).json()
+        assert {item["uuid"] for item in candidates["items"] if item["already_added"]} == {first, second}
+        assert deleted not in {item["uuid"] for item in candidates["items"]}
+        conn = get_conn()
+        deleted_id = assets["Harbor deleted"]["id"]
+        conn.execute("INSERT INTO collection_assets (collection_id, asset_id) VALUES (?, ?)",
+                     (collection_id, deleted_id))
+        conn.commit()
+        catalog = library_client.get("/api/collections").json()["collections"]
+        assert next(item["asset_count"] for item in catalog if item["id"] == collection_id) == 2
+        assert library_client.delete(endpoint).status_code == 200
+        assert library_client.get(endpoint + "/candidates").status_code == 404
+        detail = library_client.get(f"/api/assets/{first}").json()
+        assert [item["id"] for item in detail["collections"]] == [original_collection]
+        assert library_client.get(f"/api/assets/{second}/file").status_code == 200
+    finally:
+        library_client.delete(endpoint)
+
+
+def test_collection_description_create_update_and_clear(library_client):
+    assert library_client.post("/api/collections", json={"name": "Invalid description", "description": 123}).status_code == 422
+    original = '港口照片, "精选"\n第二行'
+    created = library_client.post("/api/collections", json={"name": "Description test", "description": original})
+    assert created.status_code == 200
+    assert created.json()["description"] == original
+    cid = created.json()["id"]
+    path = f"/api/collections/{cid}"
+
+    def collection():
+        return next(item for item in library_client.get("/api/collections").json()["collections"] if item["id"] == cid)
+
+    try:
+        assert collection()["description"] == original
+        for invalid in ({}, {"description": [original]}):
+            assert library_client.patch(path, json=invalid).status_code == 422
+        assert collection()["description"] == original
+        assert library_client.patch(path, json={"description": "  Edited  "}).json()["description"] == "Edited"
+        edited = collection()
+        assert edited["name"] == "Description test"
+        assert edited["description"] == "Edited"
+        assert edited["asset_count"] == 0
+        for empty in (" \n ", None):
+            assert library_client.patch(path, json={"description": empty}).json()["description"] is None
+            assert collection()["description"] is None
+    finally:
+        library_client.delete(path)
+    assert library_client.patch(path, json={"description": None}).status_code == 404
+
+
+def test_asset_edit_saves_membership_with_tags_and_metadata(library_client, harbor_demo):
+    original_collection, assets = harbor_demo
+    asset = assets["Harbor view 04"]
+    path = f"/api/assets/{asset['uuid']}"
+    detail = library_client.get(path).json()
+    original_tags = [item["name"] for item in detail["tags"]]
+    collection = library_client.post("/api/collections", json={"name": "Combined edit test"}).json()["id"]
+    try:
+        body = {"title": "Collection membership update", "tags": [*original_tags, "move/marker"],
+                "collection_ids": [collection, collection]}
+        assert library_client.patch(path, json={**body, "collection_ids": [True]}).status_code == 422
+        assert library_client.patch(path, json={**body, "collection_ids": [2**40]}).status_code == 409
+        unchanged = library_client.get(path).json()
+        assert unchanged["asset"]["title"] == detail["asset"]["title"]
+        assert unchanged["collections"] == detail["collections"]
+        assert unchanged["tags"] == detail["tags"]
+        edited = library_client.patch(path, json=body)
+        assert edited.status_code == 200
+        assert [item["id"] for item in edited.json()["collections"]] == [collection]
+        params = {"q": "collection membership update", "include_tag": "move/marker"}
+        assert library_client.get("/api/assets", params={**params, "collection_id": original_collection}).json()["total"] == 0
+        row, = read_export(library_client.get("/api/assets/export.csv", params={**params, "collection_id": collection}))
+        assert row["uuid"] == asset["uuid"]
+        assert any(entry["action"] == "collection.remove" and entry["target_id"] == str(original_collection)
+                   and entry["detail"] == asset["uuid"] for entry in library_client.get("/api/audit").json()["entries"])
+        assert library_client.patch(path, json={"collection_ids": []}).json()["collections"] == []
+        assert library_client.get("/api/assets", params=params).json()["total"] == 1
+    finally:
+        library_client.patch(path, json={"title": asset["title"], "tags": original_tags,
+                                         "collection_ids": [original_collection]})
+        library_client.delete(f"/api/collections/{collection}")
+
+
+def test_collection_actions_respect_existing_roles(library_client, harbor_demo):
+    collection, assets = harbor_demo
+    asset = assets["Harbor view 05"]["uuid"]
+    edit_path = f"/api/assets/{asset}"
+    collection_path = f"/api/collections/{collection}"
+    anonymous = {"Authorization": ""}
+    assert library_client.get("/api/collections", headers=anonymous).status_code == 401
+    assert library_client.post("/api/collections", json={"name": "Not authorized"}, headers=anonymous).status_code == 401
+    assert library_client.get(collection_path + "/candidates", headers=anonymous).status_code == 401
+    assert library_client.patch(collection_path, json={"description": None}, headers=anonymous).status_code == 401
+    assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=anonymous).status_code == 401
+    assert library_client.delete(collection_path, headers=anonymous).status_code == 401
+    for role in ("viewer", "contributor", "editor"):
+        name = "test_collections_" + role
+        password = "test-only-password"
+        created = library_client.post("/api/users", json={"username": name, "password": password, "role": role})
+        assert created.status_code == 200
+        login = library_client.post("/api/auth/login", json={"username": name, "password": password})
+        assert login.status_code == 200
+        headers = {"Authorization": "Bearer " + login.json()["token"]}
+        assert library_client.get("/api/collections", headers=headers).status_code == 200
+        expected_edit = 403 if role == "viewer" else 200
+        assert library_client.get(collection_path + "/candidates", headers=headers).status_code == expected_edit
+        assert library_client.patch("/api/collections/999999", json={"description": None}, headers=headers).status_code == (403 if role == "viewer" else 404)
+        assert library_client.patch(edit_path, json={"collection_ids": [collection]}, headers=headers).status_code == expected_edit
+        assert library_client.post(collection_path + "/assets", json={"uuids": [asset]}, headers=headers).status_code == expected_edit
+        assert library_client.delete("/api/collections/999999", headers=headers).status_code == (404 if role == "editor" else 403)
+        assert library_client.patch(edit_path, json={"status": "active"}, headers=headers).status_code == (200 if role == "editor" else 403)
+        assert library_client.delete("/api/assets/not-found", headers=headers).status_code == (404 if role == "editor" else 403)
+
+
+def test_upload_limits_and_mixed_batch(library_client, monkeypatch):
+    from keepstack.config import config
+
+    monkeypatch.setattr(config, "max_upload_mb", 1)
+    path = "/api/assets"
+    data = {"run_ai": "false"}
+    limit = 1024 * 1024
+    image = _img_bytes(color=(38, 105, 179), size=(121, 91))
+    specs = [
+        ("files", ("at-limit.csv", b"A" * limit, "text/csv")),
+        ("files", ("over-limit.csv", b"B" * (limit + 1), "text/csv")),
+        ("files", ("blank.txt", b"", "text/plain")),
+        ("files", ("invalid.png", b"not an image", "image/png")),
+        ("files", ("real.jpg", image, "image/jpeg")),
+    ]
+    result = library_client.post(path, data=data, files=specs)
+    assert result.status_code == 200
+    assert [failure["status"] for failure in result.json()["failed"]] == [413, 422, 422]
+    exact, photo = result.json()["created"]
+    assert library_client.get(f"/api/assets/{exact['uuid']}").json()["asset"]["size"] == limit
+    renamed = library_client.post(path, data=data, files={"files": ("renamed.jpg", image, "image/jpeg")})
+    assert renamed.json()["created"][0]["duplicate"] is True
+    assert renamed.json()["created"][0]["uuid"] == photo["uuid"]
+    changed = library_client.post(path, data=data, files={"files": ("real.jpg", _img_bytes(color=(38, 100, 179)), "image/jpeg")})
+    assert changed.json()["created"][0]["duplicate"] is False
+    for _, spec in specs[1:4]:
+        single = library_client.post(path, data=data, files={"files": spec})
+        assert single.status_code == (413 if spec[0] == "over-limit.csv" else 422)
+
+
+def test_legacy_slash_tag_removal_reindexes_and_audits(library_client, harbor_demo, monkeypatch):
+    from urllib.parse import quote
+
+    _, assets = harbor_demo
+    asset = assets["Harbor view 06"]
+    path = f"/api/assets/{asset['uuid']}"
+    monkeypatch.setattr(ai, "embed_image", lambda path: None)
+    monkeypatch.setattr(ai, "embed", ai._local_embed)
+    ingest.reindex_embedding(asset["id"])
+    conn = get_conn()
+
+    def embedding():
+        return conn.execute("SELECT embedding FROM assets WHERE id = ?", (asset["id"],)).fetchone()["embedding"]
+
+    original = embedding()
+    tag = "qa/slash-vector"
+    assert library_client.post(path + "/tags", json={"name": tag}).status_code == 200
+    assert embedding() != original
+    assert library_client.get("/api/assets", params={"q": "slash-vector"}).json()["total"] == 1
+    assert library_client.delete(path + "/tags/" + quote(tag, safe="")).status_code == 200
+    assert library_client.get("/api/assets", params={"q": "slash-vector"}).json()["total"] == 0
+    assert embedding() == original
+    assert any(entry["action"] == "tag.remove" and entry["detail"] == tag
+               for entry in library_client.get("/api/audit").json()["entries"])
+
+
+def test_retention_validation_and_share_expiry_and_revocation(library_client, harbor_demo):
+    _, assets = harbor_demo
+    asset = assets["Harbor view 07"]
+    path = f"/api/assets/{asset['uuid']}"
+    assert library_client.patch(path, json={"retention_until": "2026-02-30"}).status_code == 422
+    assert library_client.patch(path, json={"retention_until": "2032-02-29"}).json()["asset"]["retention_until"] == "2032-02-29"
+    assert library_client.patch(path, json={"retention_until": ""}).json()["asset"]["retention_until"] == ""
+    payload = {"target_id": asset["id"], "permission": "download"}
+    assert library_client.post("/api/shares", json={**payload, "expires_at": "tomorrow-ish"}).status_code == 422
+    expired = library_client.post("/api/shares", json={**payload, "expires_at": "2000-01-01T12:00:00-05:00"}).json()["token"]
+    assert library_client.get(f"/s/{expired}").status_code == 410
+    active = library_client.post("/api/shares", json={**payload, "expires_at": "2099-01-01T00:00:00Z"}).json()["token"]
+    assert library_client.get(f"/s/{active}/file").status_code == 200
+    share_id = next(share["id"] for share in library_client.get("/api/shares").json()["shares"] if share["token"] == active)
+    assert library_client.delete(f"/api/shares/{share_id}").status_code == 200
+    assert library_client.get(f"/s/{active}/file").status_code == 404
+
+
+def test_csv_can_export_more_than_maximum_list_page(library_client):
+    collection = library_client.post("/api/collections", json={"name": "Volume test"}).json()["id"]
+    conn = get_conn()
+    uuids = [f"csv-volume-{number:03}" for number in range(207)]
+    try:
+        conn.executemany(
+            "INSERT INTO assets (uuid, sha256, filename, title, storage_key, created_at, updated_at) VALUES "
+            "(?, 'fixture', 'fixture.txt', 'Fixture', 'unused', '2026-07-31', '2026-07-31')",
+            ((uuid,) for uuid in uuids),
+        )
+        conn.execute("INSERT INTO collection_assets (collection_id, asset_id) "
+                     "SELECT ?, id FROM assets WHERE uuid LIKE 'csv-volume-%'", (collection,))
+        conn.commit()
+        params = {"collection_id": collection, "sort": "oldest"}
+        first = library_client.get("/api/assets", params={**params, "limit": 200}).json()
+        assert first["total"] == 207 and len(first["items"]) == 200
+        assert [row["uuid"] for row in read_export(library_client.get("/api/assets/export.csv", params=params))] == uuids
+    finally:
+        conn.execute("DELETE FROM assets WHERE uuid LIKE 'csv-volume-%'")
+        conn.commit()
+        library_client.delete(f"/api/collections/{collection}")
 
 
 def test_semantic_search_returns_ranked_results():

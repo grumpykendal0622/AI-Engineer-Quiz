@@ -6,19 +6,22 @@ single-page web client is served from the ``web/`` directory at the root.
 """
 from __future__ import annotations
 
+import csv
 import io
 import ipaddress
 import json
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import (Body, Depends, FastAPI, File, Form, HTTPException, Query,
                      Request, UploadFile)
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               PlainTextResponse, Response)
+                               PlainTextResponse, Response, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 
-from . import __version__, ingest, search, standards, storage, thumbnails
+from . import __version__, ingest, metadata, search, standards, storage, thumbnails
 from .audit import log, now_iso
 from .auth import (authenticate, hash_password, login_locked, make_token,
                    note_login_failure, note_login_success, role_at_least,
@@ -153,41 +156,100 @@ def _user_public(u: dict) -> dict:
 # Assets
 # ---------------------------------------------------------------------------
 @app.post("/api/assets")
-async def upload_assets(
+def upload_assets(
     request: Request,
     files: list[UploadFile] = File(...),
     run_ai: bool = Form(True),
     user: dict = Depends(require_role("contributor")),
 ):
-    results = []
+    results, failed = [], []
     for f in files:
-        data = await f.read()
-        asset = ingest.ingest_stream(io.BytesIO(data), f.filename or "upload.bin",
-                                     user=user, run_ai=run_ai)
+        filename = f.filename or "upload.bin"
+        try:
+            validate_upload(f, filename)
+        except HTTPException as error:
+            if len(files) == 1:
+                raise
+            failed.append({"filename": filename, "status": error.status_code, "detail": error.detail})
+            continue
+        asset = ingest.ingest_stream(f.file, filename, user=user, run_ai=run_ai)
         if not asset.get("duplicate"):
             log("asset.create", user=user, target_type="asset", target_id=asset["uuid"],
                 detail=asset["filename"], ip=client_ip(request))
         results.append({"uuid": asset["uuid"], "title": asset["title"],
                         "duplicate": asset.get("duplicate", False),
                         "media_type": asset["media_type"]})
-    return {"created": results}
+    return {"created": results, "failed": failed}
 
 
-@app.get("/api/assets")
-def list_assets(
+def validate_upload(file: UploadFile, filename: str) -> None:
+    source = file.file
+    size = file.size if file.size is not None else source.seek(0, 2)
+    source.seek(0)
+    if not size:
+        raise HTTPException(422, "File is empty")
+    if size > config.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"File exceeds the {config.max_upload_mb} MiB limit")
+
+    ext = Path(filename).suffix.lower().lstrip(".")
+    mime = metadata.guess_mime(filename)
+    if metadata.media_type_for(ext, mime) != "image" and not (file.content_type or "").startswith("image/"):
+        return
+    if mime == "image/svg+xml":
+        return
+    try:
+        with Image.open(source) as verified:
+            verified.verify()
+        source.seek(0)
+        with Image.open(source) as decoded:
+            decoded.load()
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        raise HTTPException(422, "Invalid or unsupported image") from None
+    finally:
+        source.seek(0)
+
+
+def library_filters(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
     collection_id: Optional[int] = None,
-    status: str = "active",
+    include_tag: Optional[list[str]] = Query(None, max_length=100),
+    exclude_tag: Optional[list[str]] = Query(None, max_length=100),
     sort: str = "newest",
+):
+    return dict(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
+                include_tag=include_tag or (), exclude_tag=exclude_tag or (), sort=sort)
+
+
+@app.get("/api/assets")
+def list_assets(
+    filters: dict = Depends(library_filters),
     mode: str = "keyword",
-    limit: int = Query(60, le=200),
-    offset: int = 0,
+    limit: int = Query(60, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=2**63 - 1),
     user: dict = Depends(require_user),
 ):
-    return search.search(q=q, media_type=media_type, tag=tag, collection_id=collection_id,
-                         status=status, sort=sort, mode=mode, limit=limit, offset=offset)
+    return search.search(**filters, mode=mode, limit=limit, offset=offset)
+
+
+@app.get("/api/assets/export.csv")
+def export_assets(filters: dict = Depends(library_filters), user: dict = Depends(require_user)):
+    def lines():
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(("uuid", "title", "description", "filename", "media_type", "tags", "created_at"))
+        yield "\ufeff" + buffer.getvalue()
+        for values in search.export_rows(**filters):
+            buffer.seek(0)
+            buffer.truncate()
+            writer.writerow(values)
+            yield buffer.getvalue()
+
+    return StreamingResponse(lines(), media_type="text/csv", headers={
+        "Content-Disposition": 'attachment; filename="keepstack-assets.csv"',
+        "Cache-Control": "no-store",
+    })
 
 
 def _get_asset_or_404(uuid: str) -> dict:
@@ -210,7 +272,7 @@ def asset_detail(uuid: str, user: dict = Depends(require_user)):
         "WHERE asset_id = ? ORDER BY version_no DESC", (a["id"],))]
     collections = [dict(r) for r in conn.execute(
         "SELECT c.id, c.name FROM collections c JOIN collection_assets ca ON ca.collection_id = c.id "
-        "WHERE ca.asset_id = ?", (a["id"],))]
+        "WHERE ca.asset_id = ? ORDER BY c.name, c.id", (a["id"],))]
     custom = [dict(r) for r in conn.execute(
         "SELECT cf.key, cf.label, acv.value FROM asset_custom_values acv "
         "JOIN custom_fields cf ON cf.id = acv.field_id WHERE acv.asset_id = ?", (a["id"],))]
@@ -223,7 +285,32 @@ def asset_detail(uuid: str, user: dict = Depends(require_user)):
 @app.patch("/api/assets/{uuid}")
 def update_asset(uuid: str, request: Request, body: dict = Body(...),
                  user: dict = Depends(require_role("contributor"))):
+    if "status" in body and not role_at_least(user["role"], "editor"):
+        raise HTTPException(403, "Requires editor role to change asset status")
     a = _get_asset_or_404(uuid)
+    retention = body.get("retention_until")
+    if retention not in (None, ""):
+        try:
+            if not isinstance(retention, str) or date.fromisoformat(retention).isoformat() != retention:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(422, "Retention until must be a date in YYYY-MM-DD format") from None
+    desired_tags = None
+    if "tags" in body:
+        names = body["tags"]
+        if not isinstance(names, list) or any(
+            not isinstance(name, str) or not name.strip() or "\x00" in name for name in names
+        ):
+            raise HTTPException(422, "Tags must be a list of non-empty names")
+        desired_tags = {name.strip().lower() for name in names}
+    desired_collections = None
+    if "collection_ids" in body:
+        collection_ids = body["collection_ids"]
+        if not isinstance(collection_ids, list) or any(
+            type(collection_id) is not int or not 0 < collection_id < 2**63 for collection_id in collection_ids
+        ):
+            raise HTTPException(422, "Collection IDs must be a list of positive integers")
+        desired_collections = set(collection_ids)
     editable = {"title", "description", "alt_text", "license", "rights_statement",
                 "credit", "usage_expiry", "retention_until", "dc_creator",
                 "dc_subject", "dc_publisher", "dc_date", "status"}
@@ -232,15 +319,45 @@ def update_asset(uuid: str, request: Request, body: dict = Body(...),
         if k in editable:
             sets.append(f"{k} = ?")
             vals.append(v)
-    if sets:
+    reindex = bool(sets) or desired_tags is not None
+    if reindex or desired_collections is not None:
         sets.append("updated_at = ?")
         vals.extend([now_iso(), a["id"]])
+        ip = client_ip(request)
         with transaction() as conn:
             conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE id = ?", vals)
-        ingest.reindex_fts(a["id"])
-        ingest.reindex_embedding(a["id"])
-        log("asset.update", user=user, target_type="asset", target_id=uuid,
-            detail=",".join(body.keys()), ip=client_ip(request))
+            if desired_collections is not None:
+                if not conn.execute("SELECT 1 FROM assets WHERE id = ? AND status = 'active'", (a["id"],)).fetchone():
+                    raise HTTPException(409, "Only active assets can be assigned to a collection")
+                if any(conn.execute("SELECT 1 FROM collections WHERE id = ?", (collection_id,)).fetchone() is None
+                       for collection_id in desired_collections):
+                    raise HTTPException(409, "One of the selected collections no longer exists")
+                current_collections = {row["collection_id"] for row in conn.execute(
+                    "SELECT collection_id FROM collection_assets WHERE asset_id = ?", (a["id"],))}
+                for collection_id in sorted(current_collections - desired_collections):
+                    conn.execute("DELETE FROM collection_assets WHERE asset_id = ? AND collection_id = ?",
+                                 (a["id"], collection_id))
+                    log_collection_removal(conn, user, collection_id, uuid, ip)
+                conn.executemany("INSERT INTO collection_assets (asset_id, collection_id, added_at) VALUES (?,?,?)",
+                                 ((a["id"], collection_id, now_iso()) for collection_id in desired_collections - current_collections))
+            if desired_tags is not None:
+                current_tags = {row["name"]: row["id"] for row in conn.execute(
+                    "SELECT t.id, t.name FROM asset_tags at JOIN tags t ON t.id = at.tag_id "
+                    "WHERE at.asset_id = ?", (a["id"],))}
+                for name in sorted(current_tags.keys() - desired_tags):
+                    conn.execute("DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = ?",
+                                 (a["id"], current_tags[name]))
+                    log("tag.remove", user=user, target_type="asset", target_id=uuid, detail=name, ip=ip, conn=conn)
+                for name in sorted(desired_tags - current_tags.keys()):
+                    conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (name,))
+                    conn.execute("INSERT INTO asset_tags (asset_id, tag_id, source) "
+                                 "SELECT ?, id, 'manual' FROM tags WHERE name = ?", (a["id"], name))
+            if reindex:
+                ingest.reindex_fts(a["id"], conn)
+            log("asset.update", user=user, target_type="asset", target_id=uuid,
+                detail=",".join(body.keys()), ip=ip, conn=conn)
+        if reindex:
+            ingest.reindex_embedding(a["id"])
     return asset_detail(uuid, user)
 
 
@@ -307,14 +424,20 @@ def add_tag(uuid: str, request: Request, body: dict = Body(...),
     return {"ok": True}
 
 
-@app.delete("/api/assets/{uuid}/tags/{name}")
-def remove_tag(uuid: str, name: str, user: dict = Depends(require_role("contributor"))):
+@app.delete("/api/assets/{uuid}/tags/{name:path}")
+def remove_tag(uuid: str, name: str, request: Request, user: dict = Depends(require_role("contributor"))):
     a = _get_asset_or_404(uuid)
+    name = name.strip().lower()
     with transaction() as conn:
-        conn.execute(
+        removed = conn.execute(
             "DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = "
-            "(SELECT id FROM tags WHERE name = ?)", (a["id"], name.lower()))
-    ingest.reindex_fts(a["id"])
+            "(SELECT id FROM tags WHERE name = ?)", (a["id"], name)).rowcount
+        if removed:
+            ingest.reindex_fts(a["id"], conn)
+            log("tag.remove", user=user, target_type="asset", target_id=uuid,
+                detail=name, ip=client_ip(request), conn=conn)
+    if removed:
+        ingest.reindex_embedding(a["id"])
     return {"ok": True}
 
 
@@ -374,78 +497,149 @@ def list_tags(user: dict = Depends(require_user)):
 @app.get("/api/collections")
 def list_collections(user: dict = Depends(require_user)):
     rows = get_conn().execute(
-        "SELECT c.*, (SELECT COUNT(*) FROM collection_assets ca WHERE ca.collection_id = c.id) AS asset_count "
-        "FROM collections c ORDER BY c.name").fetchall()
+        "SELECT c.*, (SELECT COUNT(*) FROM collection_assets ca JOIN assets a ON a.id = ca.asset_id "
+        "WHERE ca.collection_id = c.id AND a.status = 'active') AS asset_count "
+        "FROM collections c ORDER BY c.name, c.id").fetchall()
     return {"collections": [dict(r) for r in rows]}
+
+
+def _collection_description(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(422, "Collection description must be text or null")
+    return value.strip() or None
 
 
 @app.post("/api/collections")
 def create_collection(request: Request, body: dict = Body(...),
                       user: dict = Depends(require_role("contributor"))):
     import uuid as uuidlib
-    name = (body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "Name required")
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+        raise HTTPException(422, "Enter a collection name of 1–80 characters")
+    name = name.strip()
+    description = _collection_description(body.get("description"))
     cid = str(uuidlib.uuid4())
     with transaction() as conn:
         cur = conn.execute(
             "INSERT INTO collections (uuid, name, description, parent_id, kind, created_by, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (cid, name, body.get("description"), body.get("parent_id"),
-             body.get("kind", "folder"), user["id"], now_iso()))
+            "SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM collections WHERE name = ? COLLATE NOCASE)",
+            (cid, name, description, body.get("parent_id"),
+             body.get("kind", "folder"), user["id"], now_iso(), name))
+        if not cur.rowcount:
+            raise HTTPException(409, "A collection with this name already exists")
     log("collection.create", user=user, target_type="collection", target_id=cid, detail=name)
-    return {"id": cur.lastrowid, "uuid": cid, "name": name}
+    return {"id": cur.lastrowid, "uuid": cid, "name": name, "description": description}
+
+
+@app.patch("/api/collections/{cid}")
+def update_collection_description(cid: int, request: Request, body: dict = Body(...),
+                                  user: dict = Depends(require_role("contributor"))):
+    if "description" not in body:
+        raise HTTPException(422, "Provide a collection description, or null to clear it")
+    description = _collection_description(body["description"])
+    with transaction() as conn:
+        if not conn.execute("UPDATE collections SET description = ? WHERE id = ?", (description, cid)).rowcount:
+            raise HTTPException(404, "Collection not found")
+        log("collection.update", user=user, target_type="collection", target_id=cid,
+            detail="description", ip=client_ip(request), conn=conn)
+    return {"id": cid, "description": description}
 
 
 @app.delete("/api/collections/{cid}")
 def delete_collection(cid: int, user: dict = Depends(require_role("editor"))):
     with transaction() as conn:
-        conn.execute("DELETE FROM collections WHERE id = ?", (cid,))
+        conn.execute("UPDATE collections SET parent_id = NULL WHERE parent_id = ?", (cid,))
+        if not conn.execute("DELETE FROM collections WHERE id = ?", (cid,)).rowcount:
+            raise HTTPException(404, "Collection not found")
     log("collection.delete", user=user, target_type="collection", target_id=cid)
     return {"ok": True}
+
+
+@app.get("/api/collections/{cid}/candidates")
+def collection_candidates(cid: int, limit: int = Query(12, ge=1, le=200),
+                          offset: int = Query(0, ge=0, le=2**63 - 1),
+                          user: dict = Depends(require_role("contributor"))):
+    conn = get_conn()
+    if not conn.execute("SELECT 1 FROM collections WHERE id = ?", (cid,)).fetchone():
+        raise HTTPException(404, "Collection not found")
+    results = search.search(limit=limit, offset=offset)
+    ids = [item["id"] for item in results["items"]]
+    if ids:
+        placeholders = ", ".join("?" for asset_id in ids)
+        assigned = {row["asset_id"] for row in conn.execute(
+            f"SELECT asset_id FROM collection_assets WHERE collection_id = ? AND asset_id IN ({placeholders})",
+            (cid, *ids))}
+        for item in results["items"]:
+            item["already_added"] = item["id"] in assigned
+    return {"total": results["total"], "items": results["items"]}
 
 
 @app.post("/api/collections/{cid}/assets")
 def add_to_collection(cid: int, body: dict = Body(...),
                       user: dict = Depends(require_role("contributor"))):
-    uuids = body.get("uuids", [])
-    conn = get_conn()
+    uuids = body.get("uuids")
+    if not isinstance(uuids, list) or any(not isinstance(uuid, str) or not uuid for uuid in uuids):
+        raise HTTPException(422, "Asset UUIDs must be a list of non-empty strings")
     added = 0
     with transaction() as conn:
-        for u in uuids:
-            row = conn.execute("SELECT id FROM assets WHERE uuid = ?", (u,)).fetchone()
-            if row:
-                conn.execute(
-                    "INSERT OR IGNORE INTO collection_assets (collection_id, asset_id, added_at) VALUES (?,?,?)",
-                    (cid, row["id"], now_iso()))
-                added += 1
-    log("collection.add", user=user, target_type="collection", target_id=cid, detail=f"{added} assets")
+        if not conn.execute("SELECT 1 FROM collections WHERE id = ?", (cid,)).fetchone():
+            raise HTTPException(404, "Collection not found")
+        for uuid in dict.fromkeys(uuids):
+            row = conn.execute("SELECT id FROM assets WHERE uuid = ? AND status = 'active'", (uuid,)).fetchone()
+            if row is None:
+                raise HTTPException(409, "One of the selected assets is no longer available")
+            added += conn.execute(
+                "INSERT OR IGNORE INTO collection_assets (collection_id, asset_id, added_at) VALUES (?,?,?)",
+                (cid, row["id"], now_iso())).rowcount
+    if added:
+        log("collection.add", user=user, target_type="collection", target_id=cid, detail=f"{added} assets")
     return {"ok": True, "added": added}
 
 
 @app.delete("/api/collections/{cid}/assets/{uuid}")
-def remove_from_collection(cid: int, uuid: str, user: dict = Depends(require_role("contributor"))):
+def remove_from_collection(cid: int, uuid: str, request: Request, user: dict = Depends(require_role("contributor"))):
     with transaction() as conn:
-        conn.execute(
+        removed = conn.execute(
             "DELETE FROM collection_assets WHERE collection_id = ? AND asset_id = "
-            "(SELECT id FROM assets WHERE uuid = ?)", (cid, uuid))
+            "(SELECT id FROM assets WHERE uuid = ?)", (cid, uuid)).rowcount
+        if removed:
+            log_collection_removal(conn, user, cid, uuid, client_ip(request))
     return {"ok": True}
+
+
+def log_collection_removal(conn, user, cid, uuid, ip):
+    log("collection.remove", user=user, target_type="collection", target_id=cid, detail=uuid, ip=ip, conn=conn)
 
 
 # ---------------------------------------------------------------------------
 # Sharing (public, tokenised, expiring links)
 # ---------------------------------------------------------------------------
+def parse_share_expiry(value: str) -> datetime:
+    expiry = datetime.fromisoformat(value.removesuffix("Z") + ("+00:00" if value.endswith("Z") else ""))
+    return expiry.replace(tzinfo=timezone.utc) if expiry.tzinfo is None else expiry.astimezone(timezone.utc)
+
+
 @app.post("/api/shares")
 def create_share(request: Request, body: dict = Body(...),
                  user: dict = Depends(require_role("contributor"))):
     import secrets
     token = secrets.token_urlsafe(16)
+    expiry = body.get("expires_at")
+    if expiry not in (None, ""):
+        try:
+            if not isinstance(expiry, str):
+                raise ValueError
+            expiry = parse_share_expiry(expiry).isoformat()
+        except (ValueError, OverflowError):
+            raise HTTPException(422, "Enter an ISO 8601 share expiry") from None
     with transaction() as conn:
         conn.execute(
             "INSERT INTO share_links (token, target_type, target_id, permission, expires_at, "
             "max_downloads, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)",
             (token, body.get("target_type", "asset"), body["target_id"],
-             body.get("permission", "view"), body.get("expires_at"),
+             body.get("permission", "view"), expiry,
              body.get("max_downloads"), user["id"], now_iso()))
     log("share.create", user=user, target_type=body.get("target_type"), target_id=body["target_id"])
     return {"token": token, "url": f"{config.base_url}/s/{token}"}
@@ -474,8 +668,13 @@ def _valid_share(token: str) -> dict:
     if not row:
         raise HTTPException(404, "Invalid or revoked link")
     s = dict(row)
-    if s["expires_at"] and s["expires_at"] < now_iso():
-        raise HTTPException(410, "Link expired")
+    if s["expires_at"]:
+        try:
+            expired = parse_share_expiry(s["expires_at"]) <= datetime.now(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            expired = True
+        if expired:
+            raise HTTPException(410, "Link expired")
     if s["max_downloads"] and s["download_count"] >= s["max_downloads"]:
         raise HTTPException(410, "Download limit reached")
     return s

@@ -11,16 +11,22 @@ drill-down sidebar.
 """
 from __future__ import annotations
 
+import json
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import closing
+from itertools import groupby
 from typing import Optional
 
 from . import ai
+from .config import config
 from .db import get_conn
 
 SORTS = {
-    "newest": "a.created_at DESC",
-    "oldest": "a.created_at ASC",
-    "name": "a.title ASC",
-    "largest": "a.size DESC",
+    "newest": "a.created_at DESC, a.id DESC",
+    "oldest": "a.created_at ASC, a.id ASC",
+    "name": "a.title ASC, a.id ASC",
+    "largest": "a.size DESC, a.id DESC",
 }
 
 
@@ -35,6 +41,8 @@ def search(
     q: str = "",
     media_type: Optional[str] = None,
     tag: Optional[str] = None,
+    include_tag: Sequence[str] = (),
+    exclude_tag: Sequence[str] = (),
     collection_id: Optional[int] = None,
     status: str = "active",
     sort: str = "newest",
@@ -45,47 +53,85 @@ def search(
     conn = get_conn()
 
     # Semantic mode ranks the candidate pool by embedding similarity.
-    if mode == "semantic" and q.strip():
+    if mode == "semantic" and q.strip() and not (tag or include_tag or exclude_tag or collection_id):
         return _semantic_search(q, media_type, status, limit, offset)
 
-    where = ["a.status = ?"]
-    params: list = [status]
-    join = ""
-
-    if q.strip():
-        join += " JOIN asset_fts f ON f.rowid = a.id"
-        where.append("asset_fts MATCH ?")
-        params.append(_fts_query(q))
-    if media_type:
-        where.append("a.media_type = ?")
-        params.append(media_type)
-    if tag:
-        join += (" JOIN asset_tags at ON at.asset_id = a.id"
-                 " JOIN tags t ON t.id = at.tag_id AND t.name = ?")
-        params.append(tag.lower())
-    if collection_id:
-        join += " JOIN collection_assets ca ON ca.asset_id = a.id AND ca.collection_id = ?"
-        params.append(collection_id)
-
-    where_sql = " AND ".join(where)
-    order = "bm25(asset_fts)" if q.strip() else SORTS.get(sort, SORTS["newest"])
-
-    total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM assets a{join} WHERE {where_sql}", params
-    ).fetchone()["c"]
-
+    scope, params = _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, status)
+    order = SORTS.get(sort, SORTS["newest"])
+    total = conn.execute(f"SELECT COUNT(*) AS c{scope}", params).fetchone()["c"]
     rows = conn.execute(
-        f"""SELECT a.* FROM assets a{join} WHERE {where_sql}
-            ORDER BY {order} LIMIT ? OFFSET ?""",
+        f"SELECT a.*{scope} ORDER BY {order} LIMIT ? OFFSET ?",
         [*params, limit, offset],
     ).fetchall()
-
     return {
         "total": total,
-        "items": [_card(dict(r)) for r in rows],
+        "items": [_card(dict(row)) for row in rows],
         "facets": _facets(status),
-        "mode": mode,
+        "mode": "keyword",
     }
+
+
+def _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, status):
+    included = {name.strip().lower() for name in [*include_tag, tag or ""] if name.strip()}
+    excluded = {name.strip().lower() for name in exclude_tag if name.strip()}
+    where = ["a.status = ?"]
+    where_params: list = [status]
+    join = ""
+    join_params: list = []
+
+    fts = _fts_query(q)
+    if fts:
+        join += " JOIN asset_fts f ON f.rowid = a.id"
+        where.append("asset_fts MATCH ?")
+        where_params.append(fts)
+    elif q.strip():
+        where.append("0")
+    if media_type:
+        where.append("a.media_type = ?")
+        where_params.append(media_type)
+    if collection_id is not None:
+        join += " JOIN collection_assets ca ON ca.asset_id = a.id AND ca.collection_id = ?"
+        join_params.append(collection_id)
+
+    tag_scope = "FROM asset_tags at JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = a.id"
+    if included & excluded:
+        where.append("0")
+    else:
+        if included:
+            placeholders = ", ".join("?" for name in included)
+            where.append(f"(SELECT COUNT(*) {tag_scope} AND t.name IN ({placeholders})) = ?")
+            where_params.extend([*sorted(included), len(included)])
+        if excluded:
+            placeholders = ", ".join("?" for name in excluded)
+            where.append(f"NOT EXISTS (SELECT 1 {tag_scope} AND t.name IN ({placeholders}))")
+            where_params.extend(sorted(excluded))
+    where_sql = " AND ".join(where)
+    return f" FROM assets a{join} WHERE {where_sql}", [*join_params, *where_params]
+
+
+def export_rows(
+    *, q: str = "", media_type: Optional[str] = None, tag: Optional[str] = None,
+    include_tag: Sequence[str] = (), exclude_tag: Sequence[str] = (),
+    collection_id: Optional[int] = None, sort: str = "newest",
+) -> Iterator[tuple]:
+    scope, params = _keyword_scope(q, media_type, tag, include_tag, exclude_tag, collection_id, "active")
+    order = SORTS.get(sort, SORTS["newest"])
+    statement = f"""
+        WITH matches AS (SELECT a.*{scope})
+        SELECT a.uuid, a.title, a.description, a.filename, a.media_type, a.created_at, t.name AS tag
+        FROM matches a
+        LEFT JOIN asset_tags at ON at.asset_id = a.id
+        LEFT JOIN tags t ON t.id = at.tag_id
+        ORDER BY {order}, t.name
+    """
+    with closing(sqlite3.connect(config.db_path, check_same_thread=False)) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(statement, params)
+        for _, tagged_rows in groupby(cursor, key=lambda row: row["uuid"]):
+            first = next(tagged_rows)
+            tags = [] if first["tag"] is None else [first["tag"], *(row["tag"] for row in tagged_rows)]
+            yield (first["uuid"], first["title"], first["description"], first["filename"],
+                   first["media_type"], json.dumps(tags, ensure_ascii=False), first["created_at"])
 
 
 def _semantic_search(q, media_type, status, limit, offset) -> dict:

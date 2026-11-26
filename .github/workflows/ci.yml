@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/asset-search]
   pull_request:
 
 jobs:
@@ -20,6 +20,28 @@ jobs:
       - name: Install Tesseract for the OCR test
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt pytest
+        run: python -m pip install -e '.[dev]'
       - name: Run tests
         run: python -m pytest -q
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install browser test dependencies
+        run: |
+          python -m pip install -e '.[dev,e2e]'
+          python -m playwright install --with-deps chromium
+      - name: Run browser regressions
+        env:
+          KEEPSTACK_E2E_OUTPUT: test-results/browser
+        run: python -m pytest -q tests/e2e_workflows.py
+      - name: Preserve traces and screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure
+          path: test-results/browser
+          retention-days: 7
