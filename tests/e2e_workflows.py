@@ -107,6 +107,27 @@ def login(page, user="admin", password="admin"):
     expect(page.locator("#user-label")).to_contain_text(user)
 
 
+def test_sign_out_and_show_specific_login_errors(page):
+    login(page)
+    page.get_by_role("button", name="Sign out").click()
+    sign_in = page.get_by_role("button", name="Sign in")
+    error = page.locator("#login-error")
+    page.locator("#login-pass").fill("wrong-password")
+    sign_in.click()
+    expect(error).to_have_text("Invalid credentials")
+
+    page.locator("#login-pass").fill("admin")
+    login_route = "**/api/auth/login"
+    page.route(login_route, lambda route: route.fulfill(status=500, body="Internal Server Error"), times=1)
+    sign_in.click()
+    expect(error).to_have_text("Could not sign in. Please try again.")
+    page.route(login_route, lambda route: route.fulfill(status=429), times=1)
+    sign_in.click()
+    expect(error).to_have_text("Too many failed attempts. Try again later.")
+    login(page)
+    expect(error).to_be_hidden()
+
+
 def export_rows(page, click):
     with page.expect_download() as pending:
         click()
