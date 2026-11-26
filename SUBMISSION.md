@@ -1,10 +1,5 @@
 # Keepstack — 素材检索与结果导出
 
-- Fork：[AI-Engineer-Quiz](https://github.com/grumpykendal0622/AI-Engineer-Quiz)
-- 分支：[codex/asset-search](https://github.com/grumpykendal0622/AI-Engineer-Quiz/tree/codex/asset-search)
-- 验收代码 Commit：`443bbeafecf96e5b2ac5be60cf13cad535d09665`
-- [Pull Request](https://github.com/grumpykendal0622/AI-Engineer-Quiz/pull/1) | [CI](https://github.com/grumpykendal0622/AI-Engineer-Quiz/actions/runs/45771011402)
-
 ## 1. 本地运行
 
 环境要求为 Python 3.10+。克隆仓库并切换至 `codex/asset-search` 分支，在项目根目录执行：
