@@ -438,6 +438,60 @@ def test_viewer_session_and_filter_directory_failure(page):
     expect(locator("#grid .card")).to_have_count(0)
 
 
+def test_asset_detail_retries_without_discarding_draft(page):
+    login(page)
+    card = page.locator("#grid .card").first
+    uuid = card.get_attribute("data-uuid")
+    asset = f"**/api/assets/{uuid}"
+    drawer = page.locator("#drawer")
+    metadata = drawer.locator("#asset-embedded-metadata")
+    similar = drawer.locator("#asset-similar")
+    page.route(asset, lambda route: route.fulfill(status=500), times=1)
+    card.click()
+    expect(drawer.get_by_role("alert")).to_have_text("Could not load asset details.")
+
+    held = []
+    metadata_route = asset + "/metadata"
+    fail_similar = True
+
+    def respond_to_metadata(route):
+        if not held:
+            held.append(route)
+        else:
+            route.fulfill(json={"exif": {"Model": "Test camera"}, "iptc": {}})
+
+    def respond_to_similar(route):
+        nonlocal fail_similar
+        if fail_similar:
+            fail_similar = False
+            route.fulfill(status=500)
+        else:
+            route.continue_()
+
+    page.route(metadata_route, respond_to_metadata)
+    page.route(asset + "/similar", respond_to_similar)
+    with page.expect_request(lambda request: request.url.endswith(f"/{uuid}/metadata")):
+        drawer.get_by_role("button", name="Retry", exact=True).click()
+    expect(drawer.locator(".detail-title")).to_be_visible()
+    expect(drawer.get_by_role("button", name="Download original")).to_be_visible()
+    expect(metadata.get_by_role("status")).to_have_text("Loading…")
+    expect(similar.get_by_role("alert")).to_have_text("Similar assets could not be loaded.")
+    draft = drawer.locator("#e-description")
+    draft.fill("Local draft during a metadata failure")
+    held[0].fulfill(status=500)
+    expect(metadata.get_by_role("alert")).to_contain_text("could not be loaded")
+    expect(draft).to_have_value("Local draft during a metadata failure")
+
+    metadata.get_by_role("button", name="Retry").click()
+    expect(metadata).to_contain_text("Test camera")
+    expect(metadata.get_by_role("alert")).to_have_count(0)
+    similar.get_by_role("button", name="Retry").click()
+    expect(similar.get_by_role("status")).to_have_count(0)
+    expect(similar.get_by_role("alert")).to_have_count(0)
+    expect(draft).to_have_value("Local draft during a metadata failure")
+    expect(drawer.get_by_role("button", name="Save changes")).to_be_enabled()
+
+
 def test_upload_feedback_and_open_audit_refresh(page):
     login(page)
     locator = page.locator

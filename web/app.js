@@ -498,27 +498,66 @@ function editPickerMarkup(kind, plural) {
   </details>`;
 }
 
+async function loadDetailSection(section, title, path, render, isCurrent) {
+  const heading = `<h4>${title}</h4>`;
+  section.innerHTML = `${heading}<p class="muted" role="status">Loading…</p>`;
+  try {
+    const data = await api(path);
+    if (!isCurrent()) return;
+    const content = render(data);
+    section.classList.toggle("hidden", !content);
+    section.innerHTML = content ? heading + content : "";
+  } catch {
+    if (!isCurrent()) return;
+    section.innerHTML = `${heading}<p class="error" role="alert">${title} could not be loaded.</p>
+      <button class="btn" type="button">Retry</button>`;
+    $("button", section).addEventListener("click", () => loadDetailSection(section, title, path, render, isCurrent));
+  }
+}
+
+function similarAssetImages({ items }) {
+  if (!items.length) return "";
+  return `<div class="similar-strip">${items.slice(0, 8).map(item =>
+    `<img src="/api/assets/${item.uuid}/thumb" data-uuid="${item.uuid}" title="${esc(item.title)}">`).join("")}</div>`;
+}
+
+function embeddedMetadataRows({ exif, iptc }) {
+  const entries = [...Object.entries(iptc || {}), ...Object.entries(exif || {})].slice(0, 40);
+  if (!entries.length) return "";
+  const rows = entries.map(([key, value]) => `<div class="field-row"><span class="k">${esc(key)}</span>
+    <span class="v">${esc(typeof value === "object" ? JSON.stringify(value) : value)}</span></div>`);
+  return `<div class="kv-scroll">${rows.join("")}</div>`;
+}
+
 async function openAsset(uuid) {
   if (!canLeaveAsset()) return;
   canLeaveAsset = () => true;
   const version = ++drawerVersion;
   const session = sessionVersion;
+  const isCurrent = () => session === sessionVersion && version === drawerVersion;
+  const path = "/api/assets/" + uuid;
+  const body = $("#drawer-body");
   drawer.classList.remove("hidden");
   document.body.classList.add("modal-open");
   $(".drawer-panel").scrollTop = 0;
-  $("#drawer-body").innerHTML = '<p class="muted">Loading...</p>';
-  const [d, meta, sim] = await Promise.all([
-    api("/api/assets/" + uuid),
-    api("/api/assets/" + uuid + "/metadata"),
-    api("/api/assets/" + uuid + "/similar"),
-  ]);
-  if (session !== sessionVersion || version !== drawerVersion) return;
+  body.innerHTML = '<p class="muted" role="status">Loading asset details…</p>';
+  let d;
+  try {
+    d = await api(path);
+  } catch {
+    if (!isCurrent()) return;
+    body.innerHTML = '<div class="empty"><p class="error" role="alert">Could not load asset details.</p>' +
+      '<button class="btn" type="button">Retry</button></div>';
+    $("button", body).addEventListener("click", () => openAsset(uuid));
+    return;
+  }
+  if (!isCurrent()) return;
   const a = d.asset;
   const canEdit = canEditAssets();
   const preview = a.media_type === "image"
     ? `<img class="detail-preview" src="/api/assets/${uuid}/preview" alt="${esc(a.alt_text||a.title)}">`
     : `<img class="detail-preview" src="/api/assets/${uuid}/thumb" alt="${esc(a.title)}">`;
-  $("#drawer-body").innerHTML = `
+  body.innerHTML = `
     ${preview}
     <h2 class="detail-title">${esc(a.title)}</h2>
     <p class="muted">${a.media_type} &middot; ${a.ext?.toUpperCase()} &middot; ${fmtBytes(a.size)} ${a.width?`&middot; ${a.width}&times;${a.height}`:""}</p>
@@ -554,16 +593,14 @@ async function openAsset(uuid) {
     </fieldset></form>` : `<div class="detail-section"><h4>Tags</h4><div class="tag-row" id="tag-row"></div></div>
       <div class="detail-section"><h4>Collections</h4><div class="tag-row" id="asset-collection-row"></div></div>`}
 
-    ${sim.items.length?`<div class="detail-section"><h4>Similar assets</h4>
-      <div class="similar-strip">${sim.items.slice(0,8).map(s=>`<img src="/api/assets/${s.uuid}/thumb" data-uuid="${s.uuid}" title="${esc(s.title)}">`).join("")}</div></div>`:""}
+    <div class="detail-section" id="asset-similar"></div>
 
     <div class="detail-section"><h4>Dublin Core</h4>
       <div id="dublin-core-values">${dublinCoreRows(a.dublin_core)}</div>
       <div class="btn-row"><a class="btn btn-ghost" href="/oai?verb=GetRecord&metadataPrefix=oai_dc&identifier=oai::${a.uuid}" target="_blank">View OAI-PMH XML</a></div>
     </div>
 
-    ${Object.keys(meta.exif||{}).length||Object.keys(meta.iptc||{}).length?`<div class="detail-section"><h4>Embedded metadata (EXIF / IPTC)</h4>
-      <div class="kv-scroll">${[...Object.entries(meta.iptc||{}),...Object.entries(meta.exif||{})].slice(0,40).map(([k,v])=>`<div class="field-row"><span class="k">${esc(k)}</span><span class="v">${esc(typeof v==='object'?JSON.stringify(v):v)}</span></div>`).join("")}</div></div>`:""}
+    <div class="detail-section" id="asset-embedded-metadata"></div>
 
     ${d.versions.length?`<div class="detail-section"><h4>Versions</h4>${d.versions.map(v=>`<div class="field-row"><span class="k">v${v.version_no}</span><span class="v">${esc(v.note||'')} &middot; ${fmtBytes(v.size)} &middot; ${(v.created_at||'').slice(0,10)}</span></div>`).join("")}</div>`:""}
   `;
@@ -582,7 +619,6 @@ async function openAsset(uuid) {
       button.disabled = false;
     }
   });
-  $$("#drawer-body .similar-strip img").forEach(img => img.addEventListener("click", () => openAsset(img.dataset.uuid)));
   if (canEdit) {
     bindAssetEditor(uuid, d.tags, d.collections);
     $("#d-share")?.addEventListener("click", async () => {
@@ -603,6 +639,14 @@ async function openAsset(uuid) {
     if (version === drawerVersion) resetDrawer();
     refreshAssetViews({collections: true});
   });
+  const similar = $("#asset-similar", body);
+  similar.addEventListener("click", event => {
+    const image = event.target.closest("img[data-uuid]");
+    if (image) openAsset(image.dataset.uuid);
+  });
+  loadDetailSection(similar, "Similar assets", path + "/similar", similarAssetImages, isCurrent);
+  loadDetailSection($("#asset-embedded-metadata", body), "Embedded metadata (EXIF / IPTC)",
+    path + "/metadata", embeddedMetadataRows, isCurrent);
 }
 
 function renderDetailChips(row, items, kind, removeItem) {
