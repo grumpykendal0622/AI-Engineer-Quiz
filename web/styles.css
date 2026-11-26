@@ -111,6 +111,9 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .filter-field input, .filter-field select, .filter-field textarea { width: 100%; font: inherit; font-weight: 400; min-height: 38px; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--base-3); color: var(--text); background: var(--base-0); }
 .filter-field textarea { resize: vertical; }
 .tag-filter { position: relative; min-width: 0; --filter-sign: #146447; --filter-bg: #eaf7f1; }
+.collection-filter { --filter-sign: var(--accent); --filter-bg: var(--accent-dim); }
+.collection-filter .tag-picker { inset-inline: 0 auto; }
+.collection-filter .tag-selection-count { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .exclude-filter { --filter-sign: #8b451e; --filter-bg: #fff1e8; }
 .tag-filter { display: grid; align-content: space-between; gap: 5px; }
 .tag-filter small { display: block; color: var(--muted); line-height: 1.3; }

@@ -57,9 +57,22 @@
               <input id="search" type="search" placeholder="Search titles, filenames, tags, or metadata">
             </label>
             <div class="filter-options">
-              <label class="filter-field">Collection
-                <select id="filter-collection"><option value="">All collections</option></select>
-              </label>
+              <div class="tag-filter collection-filter">
+                <div class="tag-filter-label"><strong>Collection</strong></div>
+                <details id="filter-collection">
+                  <summary><span class="tag-selection-count">All collections</span></summary>
+                  <div class="tag-picker">
+                    <label class="filter-field">Find a collection<input type="search" placeholder="Search collection names"></label>
+                    <div class="tag-options"></div>
+                    <div class="tag-picker-actions">
+                      <button type="button" class="btn tag-prev">Previous</button>
+                      <span class="tag-page muted" aria-live="polite"></span>
+                      <button type="button" class="btn tag-next">Next</button>
+                      <button type="button" class="btn tag-done">Done</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
               <label class="filter-field">Media type
                 <select id="filter-media">
                   <option value="">All types</option><option value="image">Image</option>
